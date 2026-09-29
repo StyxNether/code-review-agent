@@ -1,13 +1,20 @@
-"""cra 命令行入口：argparse + 最小问答 REPL。
+"""cra 命令行入口：argparse + REPL，rich 流式彩色渲染。
 
-M0 范围（Design.md §3.4 M0 豁免）：无工具、无 Agent 循环、无跨轮记忆，
-cli 直连 llm；纯文本输出（rich 流式彩色与内置命令 /clear 属 M1）。
+cli 只管交互与渲染（§3.4）：LLM 调用与工具执行一律经 Agent（M1 已收敛 M0 的
+直连豁免）；从 llm 导入的只有 LLMError 类型本身，不直接发起 LLM 请求。
 """
 
 import argparse
 import sys
 
-from cra import config, llm
+from rich.console import Console
+from rich.markdown import Markdown
+
+from cra import config
+from cra.agent import Agent
+from cra.llm import LLMError
+
+_TOOL_ARGS_PREVIEW_LIMIT = 80
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -26,15 +33,93 @@ def _print_setup_guide() -> None:
     print('设置方法（Windows）：setx SE_CodeAgent "sk-你的key"，然后新开终端重试。')
 
 
+def _short(text: str, limit: int = _TOOL_ARGS_PREVIEW_LIMIT) -> str:
+    """单行预览：压掉换行并截断，避免工具参数刷屏。"""
+    collapsed = " ".join(text.split())
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
+
+
+class _StreamingMarkdown:
+    """§3.1 流式渲染：已完成的段落用 rich Markdown 逐段打印，终块在流结束时渲染。
+
+    不使用 rich.Live（Windows 传统控制台下 Live 重绘不可靠）。
+    段落切分避开 ``` 围栏内部，防止代码块被空行拆碎。
+    """
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+        self._buffer = ""
+
+    def feed(self, delta: str) -> None:
+        """接收一条文本增量，把其中已完成的段落渲染出去。"""
+        self._buffer += delta
+        while True:
+            split_at = self._paragraph_end()
+            if split_at == -1:
+                return
+            segment, self._buffer = self._buffer[:split_at], self._buffer[split_at + 2 :]
+            self._print_segment(segment)
+
+    def finish(self) -> None:
+        """流结束后渲染终块（最后一段）；中断/报错时也已收到的部分可见。"""
+        if self._buffer.strip():
+            self._print_segment(self._buffer)
+        self._buffer = ""
+
+    def _paragraph_end(self) -> int:
+        """下一个不在 ``` 围栏内的空行（双换行）位置；没有则返回 -1。"""
+        index = self._buffer.find("\n\n")
+        while index != -1:
+            if self._buffer[:index].count("```") % 2 == 0:
+                return index
+            index = self._buffer.find("\n\n", index + 1)
+        return -1
+
+    def _print_segment(self, text: str) -> None:
+        if text.strip():
+            self._console.print(Markdown(text))
+
+
+def _run_turn(agent: Agent, console: Console, user_input: str) -> None:
+    """执行一轮对话：工具调用打点、最终回答流式渲染、中断与请求错误兜底。"""
+    streamer = _StreamingMarkdown(console)
+    try:
+        agent.run(
+            user_input,
+            on_tool=lambda name, args: console.print(
+                f"⚙ {name}({_short(args)})", style="dim", markup=False, highlight=False
+            ),
+            on_tool_result=lambda result: console.print(
+                "  ↳ 工具返回错误（已回传模型）"
+                if result.startswith("错误")
+                else f"  ↳ 完成（{len(result)} 字符）",
+                style="dim",
+                markup=False,
+            ),
+            on_delta=streamer.feed,
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠ 本轮已中断作废。[/]")
+    except LLMError as exc:  # 重试与错误细分在 M2 实现
+        console.print(f"[red][请求失败] {exc}[/]")
+        console.print("[dim]请检查网络与 API key。[/]")
+    finally:
+        streamer.finish()
+        console.print()
+
+
 def _run_chat() -> None:
-    """逐条问答 REPL：每轮独立请求，不保留上下文。"""
+    """REPL 主循环：exit 退出；/clear 重置为仅含系统提示词的初始状态（§6）。"""
     if not config.get_api_key():
         _print_setup_guide()
         sys.exit(1)
 
-    client = llm.create_client()
-    model = config.get_model()
-    print(f"code-review-agent 已就绪（模型：{model}）。输入内容开始对话，输入 exit 退出。")
+    console = Console()
+    agent = Agent()
+    console.print(
+        f"[bold]code-review-agent[/] 已就绪（模型：{agent.model}）。"
+        "提出审查需求即可；exit 退出，/clear 清空上下文。"
+    )
     while True:
         try:
             user_input = input("你> ").strip()
@@ -44,17 +129,13 @@ def _run_chat() -> None:
         if not user_input:
             continue  # 空输入/纯空白直接进入下一轮提示，不调 API（§6）
         if user_input == "exit":
-            print("再见。")
+            console.print("再见。")
             return
-        try:
-            reply = llm.chat(client, model, [{"role": "user", "content": user_input}])
-        except KeyboardInterrupt:
-            print("\n（本轮已中断）")
-        except llm.LLMError as exc:  # M0 直接给出可读报错；重试与错误细分在 M2 实现
-            print(f"[请求失败] {exc}")
-            print("请检查网络与 API key。")
-        else:
-            print(f"cra> {reply}\n")
+        if user_input == "/clear":
+            agent.reset()
+            console.print("[dim]上下文已清空（系统提示词保留）。[/]")
+            continue
+        _run_turn(agent, console, user_input)
 
 
 def main() -> None:
