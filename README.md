@@ -1,6 +1,6 @@
 # code-review-agent · 代码审查助手
 
-> 🚧 开发中：本文档描述目标形态，随里程碑推进校对（当前进度见 [docs/PROGRESS.md](docs/PROGRESS.md)）。
+> ✅ v0.1 交付版（《软件工程与项目实践》第 1 次作业）。开发过程与各里程碑验收记录见 [docs/PROGRESS.md](docs/PROGRESS.md)。
 
 基于 LLM 的命令行代码审查工具。给它一段/一个/一组代码文件（任意文本型源码与配置文件，Python 为主），它以代码审查员身份输出分级问题清单，并能在多轮对话中自主调用工具（读文件、运行代码）核实问题。
 
@@ -46,15 +46,22 @@ uv run cra chat
 
 ## 使用示例
 
-```
+```text
 $ uv run cra chat
+code-review-agent 已就绪（模型：deepseek-flash）。提出审查需求即可；exit 退出，/clear 清空上下文。
 你> 审查 src/cra/agent.py
-cra> （先调用 read_file 读取文件，随后输出）
-     【严重】agent.py:42 —— 工具调用缺少超时控制，可能永久阻塞…
-     【一般】agent.py:57 —— 异常被静默吞掉，建议回传模型…
-     【建议】agent.py:13 —— 可为循环轮次加常量命名…
+⚙ read_file({"path": "src/cra/agent.py"})
+  ↳ 完成（9xxx 字符）
+
+【严重】src/cra/agent.py:42 — 工具调用缺少超时控制，可能永久阻塞。
+修改建议：为 subprocess 调用设置 timeout 参数并捕获 TimeoutExpired。
+【一般】src/cra/agent.py:57 — 异常被静默吞掉。
+修改建议：将异常信息结构化回传模型。
+
 你> 第 1 条为什么严重？
-cra> ……（多轮上下文延续）
+（多轮上下文延续，Agent 基于前文作答）
+你> exit
+再见。
 ```
 
 ## 配置
@@ -77,7 +84,7 @@ cra> ……（多轮上下文延续）
 
 ## 限制
 
-- `run_python` 在本机直接执行代码（非沙箱）：请勿在审查不可信代码时滥用执行功能；子进程会继承包括 API key 在内的环境变量。
+- `run_python` 在本机直接执行代码（**非沙箱、限时执行**：默认 10 秒，超时强制终止整棵进程树）：请勿在审查不可信代码时滥用执行功能；子进程会继承包括 API key 在内的环境变量。该限制同时明示于 `cra chat --help` 与工具 description。
 - 审查支持任意文本型源码与配置文件；执行验证仅支持 Python（`run_python`），其他语言的结论以静态审查为准。
 - 审查意见由大模型生成，仅供参考，不能替代人工评审。
 
@@ -93,7 +100,8 @@ uv run ruff check .  # 代码规范检查
 
 ## 效果截图
 
-（截图待补：单轮审查 / 多轮追问 / 边界样例表现）
+（占位小节——截图由作者在提交前补充：单轮审查 / 多轮追问 / 边界样例表现，可对照
+`tests/fixtures/buggy_samples/` 中的样例演示超时强杀与非 Python 文件提示。）
 
 ## Roadmap
 

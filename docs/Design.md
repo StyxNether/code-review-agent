@@ -56,10 +56,10 @@ tests/
 "输入 → 推理 → 工具调用 → 输出"的实现：
 
 1. 用户输入追加进 `messages`；系统提示词常驻首位（角色 + 输出格式 + 工具使用策略）。
-2. 调用 LLM，传入工具注册表的 JSON schema（function calling）。**工具轮次一律非流式调用**（需要完整 `tool_calls`，`usage` 直接可取）；仅最终回答使用流式。
+2. 调用 LLM，传入工具注册表的 JSON schema（function calling）。**统一采用流式请求**（M1 实现修订，验收认可：轮次类型只能在响应返回后判定，无法预判；`tool_calls` 由分片按 index 组装、完整性与非流式等价，`usage` 经 `stream_options={"include_usage": true}` 在末块取得；工具轮不渲染文本增量，用户可见行为仍为"仅最终回答流式"）。
 3. 若响应含 `tool_calls`：逐个执行 handler → 结果作为 tool 角色消息追加 → 回到 2；**最大工具轮次 10**，超过则强制要求模型给出结论，防止失控。
 4. 否则流式输出最终回答：rich Console 逐段打印 + 终块 Markdown 渲染，**不使用 rich.Live**（Windows 传统控制台下 Live 重绘不可靠）。
-5. **上下文记忆** = `messages` 列表在 REPL 会话内持续存在。截断：以最近一次响应的 `usage.total_tokens` 超过 `CRA_MAX_CONTEXT_TOKENS`（默认 100000）为阈值（流式模式下需 `stream_options={"include_usage": true}` 才能在末块拿到 usage）；以**完整轮次**（用户消息 → 最终回答，含其间全部 tool 消息）为原子单位从最旧丢弃，保证 `tool_calls` 与其配对的 `tool` 消息不被拆散（拆散会导致 API 400）；系统提示词永远保留。
+5. **上下文记忆** = `messages` 列表在 REPL 会话内持续存在。截断：以最近一次响应的 `usage.total_tokens` 超过 `CRA_MAX_CONTEXT_TOKENS`（默认 100000）为阈值；以**完整轮次**（用户消息 → 最终回答，含其间全部 tool 消息）为原子单位从最旧丢弃，保证 `tool_calls` 与其配对的 `tool` 消息不被拆散（拆散会导致 API 400）；系统提示词永远保留。
 
 ### 3.2 工具 schema
 
@@ -142,30 +142,37 @@ tests/
 
 | 项 | 估算 | 实际（收尾填） |
 |----|------|----------------|
-| 总规模 | ~1000 LOC（含测试，git 统计为准） | |
-| 人工投入 | 设计评审 0.5h + 4×里程碑验收 0.25h + 收尾 0.5h = **2.0h** | |
-| AI 生成 | 全部实现代码与测试初稿 | |
-| 日历时间 | 2–3 天（4 个编码会话，每个 30–90 分钟） | |
+| 总规模 | ~1000 LOC（含测试，git 统计为准） | **3273 LOC**（Python，`git ls-files "*.py"` 统计：src 1240 + tests 1857 + scripts 176；另有 docs ≈600 行）。约为估算 3 倍：主因 pytest 覆盖面按 DoD 逐里程碑扩大（测试占比 57%）与流式渲染/边界处理细节 |
+| 人工投入 | 设计评审 0.5h + 4×里程碑验收 0.25h + 收尾 0.5h = **2.0h** | M0–M2 验收实测共 22 分钟（PROGRESS 耗时表）；设计评审与 M3 验收、收尾由用户在耗时表补填 |
+| AI 生成 | 全部实现代码与测试初稿 | 一致：全部实现与测试由 AI 编码会话生成，人工评审设计、逐里程碑验收并把意见回灌修复轮 |
+| 日历时间 | 2–3 天（4 个编码会话，每个 30–90 分钟） | 1 天（2026-09-29 完成 M0–M2 编码+验收+修复轮与 M3 编码），快于估算 |
 
-### 8.2 代码评审 Checklist（收尾门禁逐项执行，结果写回此处）
+### 8.2 代码评审 Checklist（收尾门禁逐项执行，结果写回此处；M3 编码会话执行，2026-09-29）
 
-- [ ] 全仓库 grep 无明文密钥；`SE_CodeAgent` 只经 `config.py` 从环境变量读取
-- [ ] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉
-- [ ] `run_python` 有超时强杀与输出截断
-- [ ] Agent 循环有最大工具轮次（10）限制
-- [ ] 消息截断按完整轮次原子丢弃，`tool_calls`/`tool` 配对不被拆散，系统提示词保留
-- [ ] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明
-- [ ] README 每条命令逐条实测可复制执行
-- [ ] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析
-- [ ] ruff 全绿；公开函数有类型标注；命名自解释、无无意义缩写
-- [ ] 模块依赖方向符合 §3.4（无反向 / 越层 import）
-- [ ] `git status` 干净：无 venv/缓存/密钥文件被跟踪
-- [ ] Design.md 与实现一致（模型名、工具名、模块名、入口、配置项）
+- [x] 全仓库 grep 无明文密钥；`SE_CodeAgent` 只经 `config.py` 从环境变量读取 ✅（`grep -rniE "sk-[a-z0-9]{8,}|api_key=…"` 于 src/tests/scripts/pyproject 无命中；`os.environ` 读取点仅 config.py——exec_py 的 `{**os.environ}` 是子进程继承边界，§9 已声明）
+- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅（grep 无 `except:`；注册表 dispatch 统一兜底为结构化错误文本，agent/cli 的异常路径均有处理与测试，无静默路径）
+- [x] `run_python` 有超时强杀与输出截断 ✅（exec_py：taskkill /T /F 杀进程树、stdout/stderr 各截 2000 字符；TestTimeout / TestTruncation 锁定）
+- [x] Agent 循环有最大工具轮次（10）限制 ✅（`MAX_TOOL_ROUNDS = 10`，超限丢弃响应并以不带 tools 的调用强制收尾；TestMaxToolRounds）
+- [x] 消息截断按完整轮次原子丢弃，`tool_calls`/`tool` 配对不被拆散，系统提示词保留 ✅（truncate_rounds 纯函数 + assert_rounds_atomic 多用例，含"截断后中断回滚"回归；M3 补边界：usage==阈值、超 1 token、估算收敛）
+- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M3 落实：chat 子命令 help+description、README「限制」小节；test_chat_help_declares_non_sandbox_and_timeout 锁定）
+- [x] README 每条命令逐条实测可复制执行 ✅（M3：`uv sync`、`uv run cra chat`（真实一轮含工具调用与流式渲染）、`uv run pytest`、`uv run ruff check .` 均执行通过；`setx` 为用户环境操作未实际执行，其指引文字与 config.py 读取行为已核对）
+- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（test_tools_fs / test_tools_exec / test_registry / test_agent / test_cli / test_llm / test_config，M3 收口共 152 项）
+- [x] ruff 全绿；公开函数有类型标注；命名自解释、无无意义缩写 ✅（`uv run ruff check .` 通过；公开函数均有标注与简短 docstring）
+- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import）✅（grep 证实 llm/tools/config/prompts 无 agent/cli 引用；cli 经 agent，仅另引入 `LLMError` 类型与 `ERROR_PREFIX` 常量，不直接发起请求、不直接执行工具）
+- [x] `git status` 干净：无 venv/缓存/密钥文件被跟踪 ✅（仅 untracked "Homework 1.pptx"，待用户决定是否入库；.gitignore 覆盖 .venv/缓存/.env/dist）
+- [x] Design.md 与实现一致（模型名、工具名、模块名、入口、配置项）✅（模型 deepseek-flash、三工具、src/cra 布局、`cra = "cra.cli:main"`、5 个配置项逐项核对一致；§3.1 流式表述已按 M1 实现修订如上）
 
 ### 8.3 复盘、缺陷记录与 PIP（收尾时填写）
 
-- 缺陷记录：各里程碑验收中发现的问题数与去向（现场修复 / 遗留说明）
-- 估算偏差：（人工/规模/日历各实际 vs 估算）
+- 缺陷记录（M3 填写）：各里程碑验收与走查共发现 **19 项**，全部闭环、无遗留缺陷：
+  - M0 验收（用户）：1 项——提示词角色未定义【一般】→ M1 prompts.py 落实。
+  - M1 验收（用户）：1 项——输出文字堆叠不便阅读【建议】→ M1 修复轮 1（空行/加粗）。
+  - M1 走查（cra 复审两轮）：13 项——中断回滚索引失位致孤儿 tool_calls【严重】、空回答静默入库【一般】→ 修复轮 1；标记加粗漏标、围栏奇偶误判、工具失败判定、rich markup 注入、REPL 意外异常兜底、llm 异常包装扩大【一般 6】及显式化小项【建议 5】→ 修复轮 2。
+  - M2 编码期（buggy_samples 回归）：1 项——read_file 空文件误报区间错误【一般】→ 现场修复（eadd0ee）。
+  - M2 验收（用户）：2 项——审查语言边界设置错误【一般】、修改建议格式与分级着色【建议】→ M2 修复轮（多语言放开、标记切片渲染）。
+  - M2 修复轮自测回归：1 项——CommonMark flanking 规则致标记加粗失效【一般】→ 渲染改标记切片（8ba765d）。
+  - M3 挂账清单处置：finish_reason 透传、print/console 输出统一、key 指引跨平台化、_run_chat 可测性均已落地；stream_options 不做降级重试（DeepSeek 实测支持，400 属参数错误不重试，已有回归锁定）、truncate O(n²) 复评维持不改（消息规模小且截断罕见，两轮评估结论一致，见 PROGRESS.md M3 记录）。
+- 估算偏差：（人工/规模/日历各实际 vs 估算——规模已填 §8.1，人工与日历由用户结合耗时表填写）
 - 过程问题：
 - PIP（下一项目——结对项目将在本项目上增量开发与重构——的改进项）：
 
