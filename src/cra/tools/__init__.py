@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from cra.tools import fs
+from cra.tools import exec_py, fs
 
 Handler = Callable[..., str]
 
@@ -86,7 +86,7 @@ class ToolRegistry:
 
 
 def _build_default_registry() -> ToolRegistry:
-    """内置文件工具（§3.2）；M2 的 run_python 在此追加注册。"""
+    """内置三工具（§3.2）：list_dir / read_file / run_python。"""
     registry = ToolRegistry()
     registry.register(
         name="list_dir",
@@ -120,6 +120,29 @@ def _build_default_registry() -> ToolRegistry:
         },
         handler=fs.read_file,
     )
+    registry.register(
+        name="run_python",
+        description=(
+            "运行 Python 代码并返回退出码与 stdout/stderr（各截断至 2000 字符）。"
+            "code（内联代码）与 path（.py 文件路径，相对当前工作目录，非 .py 文件"
+            "无法执行）二选一。**本机直接运行，非沙箱**：代码拥有当前用户全部权限，"
+            "只用于执行审查中需要验证的可信代码片段；限时执行，默认 10 秒"
+            "（可用 timeout 参数调低，上限 60 秒），超时将强制终止整棵进程树。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "要执行的 Python 代码（与 path 二选一）"},
+                "path": {"type": "string", "description": "要执行的 .py 文件路径（与 code 二选一）"},
+                "timeout": {
+                    "type": "integer",
+                    "description": "超时秒数，默认 10（CRA_EXEC_TIMEOUT），上限 60",
+                },
+            },
+            "required": [],
+        },
+        handler=exec_py.run_python,
+    )
     return registry
 
 
@@ -127,5 +150,5 @@ DEFAULT_REGISTRY = _build_default_registry()
 
 
 def get_default_registry() -> ToolRegistry:
-    """返回内置工具注册表（含 list_dir / read_file）。"""
+    """返回内置工具注册表（含 list_dir / read_file / run_python）。"""
     return DEFAULT_REGISTRY

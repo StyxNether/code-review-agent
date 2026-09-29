@@ -10,9 +10,20 @@ def _boom(**_: str) -> str:
     raise RuntimeError("内部炸了")
 
 
-def test_default_registry_has_fs_tools() -> None:
+def test_default_registry_has_builtin_tools() -> None:
     names = {item["function"]["name"] for item in get_default_registry().schemas()}
-    assert names == {"list_dir", "read_file"}
+    assert names == {"list_dir", "read_file", "run_python"}
+
+
+def test_run_python_declares_non_sandbox() -> None:
+    """§3.2/§4：非沙箱限制必须在工具 description 中明示（模型与用户可见）。"""
+    schema = next(
+        item
+        for item in get_default_registry().schemas()
+        if item["function"]["name"] == "run_python"
+    )
+
+    assert "非沙箱" in schema["function"]["description"]
 
 
 def test_schemas_are_openai_function_format() -> None:
@@ -35,11 +46,19 @@ def test_dispatch_reads_real_file(tmp_path: Path) -> None:
 
 
 def test_unknown_tool_structured_error() -> None:
-    result = get_default_registry().dispatch("run_python", "{}")
+    result = get_default_registry().dispatch("no_such_tool", "{}")
 
     assert result.startswith("错误")
     assert "未注册" in result
-    assert "run_python" in result
+    assert "no_such_tool" in result
+
+
+def test_run_python_missing_both_args_structured_error() -> None:
+    """code/path 都缺 → 结构化错误（而非 TypeError 文本），提示二选一。"""
+    result = get_default_registry().dispatch("run_python", "{}")
+
+    assert result.startswith("错误")
+    assert "二选一" in result
 
 
 def test_invalid_json_args_structured_error() -> None:
