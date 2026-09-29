@@ -424,6 +424,40 @@ class TestMaxToolRounds:
         assert agent.recursion_limit == 2 * 3 + 5
 
 
+class TestMalformedToolCallArgs:
+    def test_malformed_args_normalized_to_error_prefix_in_request(self) -> None:
+        """畸形 JSON 参数：框架在模型请求侧合成的提示须归一为"错误："前缀。"""
+        mixed = AIMessage(
+            content="",
+            tool_calls=[{"name": "echo", "args": {"text": "ok"}, "id": "c1", "type": "tool_call"}],
+            invalid_tool_calls=[
+                {
+                    "name": "echo",
+                    "args": "{bad json",
+                    "id": "cX",
+                    "error": "oops",
+                    "type": "invalid_tool_call",
+                }
+            ],
+        )
+        agent, fake = make_agent([mixed, text_response("结论")])
+
+        agent.run("x")
+
+        malformed = [
+            m
+            for m in fake.requests[1]
+            if isinstance(m, ToolMessage) and "could not be executed" in m.content
+        ]
+        assert len(malformed) == 1
+        assert malformed[0].content.startswith("错误：")
+        # 正本仍以有效调用收尾；合成 ToolMessage 的 id 只在 invalid_tool_calls 中
+        # （框架行为：不入 API 序列化，对严格校验的服务端存在孤儿风险——已记录 Design §8.3）
+        assert agent.messages[-1].content == "结论"
+        valid_tool = [m for m in agent.messages if isinstance(m, ToolMessage) and m.tool_call_id == "c1"]
+        assert len(valid_tool) == 1
+
+
 class TestTruncateRounds:
     def test_under_threshold_untouched(self) -> None:
         messages = make_round("u1", with_tools=False)

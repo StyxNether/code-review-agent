@@ -44,6 +44,9 @@ MAX_TOOL_ROUNDS = 10  # §3.1：最大工具轮次，超过则强制要求模型
 # ToolNode 对参数校验失败等分支的兜底文案前缀（langgraph prebuilt）；统一改写为
 # "错误："前缀后回传模型（§3.1(3)：协议是行为锁定点，框架文案不得直通模型）
 _FRAMEWORK_ERROR_PREFIX = "Error:"
+# 工厂对"畸形/截断 JSON 参数"在模型请求侧合成的提示标记（不经工具层，绕过
+# wrap_tool_call）：同样归一为"错误："前缀
+_FRAMEWORK_MALFORMED_MARK = "could not be executed"
 
 # finish_reason="length" 时附加到最终回答（M1 挂账：长度截断的回答此前被静默当
 # 最终结论，用户无法察觉不完整）；同段文本一并入库，保证"继续"追问时模型可见
@@ -151,6 +154,27 @@ class _ToolCallbacksMiddleware(AgentMiddleware):
         self._registry = registry
         # 由 Agent.run 按轮设置/清除（REPL 串行执行，一轮最多一个活动回调组）
         self.callbacks: tuple[ToolEventCallback | None, ToolResultCallback | None] | None = None
+
+    def wrap_model_call(
+        self, request: ModelRequest, handler: Callable[[ModelRequest], Any]
+    ) -> Any:
+        """模型通道错误前缀归一（框架对畸形参数的合成提示只在请求侧出现）。"""
+        if not any(
+            isinstance(message, ToolMessage)
+            and isinstance(message.content, str)
+            and _FRAMEWORK_MALFORMED_MARK in message.content
+            for message in request.messages
+        ):
+            return handler(request)
+        normalized = [
+            message.model_copy(update={"content": ERROR_PREFIX + message.content})
+            if isinstance(message, ToolMessage)
+            and isinstance(message.content, str)
+            and _FRAMEWORK_MALFORMED_MARK in message.content
+            else message
+            for message in request.messages
+        ]
+        return handler(request.override(messages=normalized))
 
     def wrap_tool_call(
         self, request: ToolCallRequest, handler: Callable[[ToolCallRequest], Any]
