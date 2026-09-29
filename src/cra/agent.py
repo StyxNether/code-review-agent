@@ -33,7 +33,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import StructuredTool, tool
 
 from cra import config, llm
 from cra.prompts import SYSTEM_PROMPT
@@ -225,24 +225,20 @@ class _ContextTrimMiddleware(AgentMiddleware):
 
 
 def _bridge_tool(registry: ToolRegistry, tool_def: Tool) -> StructuredTool:
-    """单个注册表工具的 LangChain 桥接：执行统一委托 registry.dispatch。
+    """经 @tool 声明单个注册表工具的 LangChain 桥接：执行统一委托 registry.dispatch。
 
-    args_schema 直接采用注册表的 JSON schema（模型可见 schema 逐字段保真）；
-    parse_input=False 使参数不经框架 pydantic 校验直达 dispatch——参数缺失/
-    类型不符等仍由注册表以"错误：…"结构化文本兜底，协议路径与 M3 一致。
+    args_schema 直接采用注册表的 JSON schema（模型可见 schema 逐字段保真，@tool
+    的类型标注推断在此不适用）；dict schema 下参数不经框架 pydantic 校验直达
+    dispatch——参数缺失/类型不符等仍由注册表以"错误：…"结构化文本兜底，协议
+    路径与 M3 一致。
     """
     name = tool_def.name
 
+    @tool(name, description=tool_def.description, args_schema=tool_def.parameters)
     def _dispatch(**kwargs: Any) -> str:
         return registry.dispatch(name, json.dumps(kwargs, ensure_ascii=False))
 
-    return StructuredTool.from_function(
-        _dispatch,
-        name=name,
-        description=tool_def.description,
-        args_schema=tool_def.parameters,
-        parse_input=False,
-    )
+    return _dispatch
 
 
 class Agent:
