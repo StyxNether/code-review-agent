@@ -6,10 +6,11 @@ tool_calls 分片组装与 usage 读取都在此层完成，agent 不接触 SDK 
 """
 
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from openai import APIError, OpenAI
+from openai import OpenAI, OpenAIError
 
 from cra import config
 
@@ -50,10 +51,18 @@ class LLMResponse:
 
 def create_client() -> OpenAI:
     """按 SE_CodeAgent / CRA_BASE_URL 构建 OpenAI 兼容客户端。"""
+    api_key = config.get_api_key()
+    if not api_key:
+        # 显式校验：SDK 在 api_key 为 None 时会回退读取 OPENAI_API_KEY，可能把
+        # OpenAI 的密钥发往 CRA_BASE_URL（§5：key 只从 SE_CodeAgent 读取）
+        raise LLMError("未设置环境变量 SE_CodeAgent（DeepSeek API key）。")
     return OpenAI(
-        api_key=config.get_api_key(),
+        api_key=api_key,
         base_url=config.get_base_url(),
         timeout=REQUEST_TIMEOUT_SECONDS,
+        # 显式关闭 SDK 隐式重试（默认 2 次）：重试策略由 M2 在应用层统一实现，
+        # 避免两层重试叠加、行为不可观测
+        max_retries=0,
     )
 
 
@@ -71,8 +80,23 @@ def complete(
         if stream:
             return _complete_streaming(client, model, messages, tools, on_delta)
         return _complete_once(client, model, messages, tools)
-    except APIError as exc:
+    except OpenAIError as exc:
+        # OpenAIError 是 APIError 的父类：Length/ContentFilterFinishReason 等非 API
+        # 异常同样包装，保证上层只需处理 LLMError（§3.4：屏蔽 SDK 异常类型）
         raise LLMError(str(exc)) from exc
+
+
+def _request_kwargs(
+    model: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, *, stream: bool
+) -> dict[str, Any]:
+    """构造请求参数；tools 为空时省略该字段，不依赖 None 的序列化语义。"""
+    kwargs: dict[str, Any] = {"model": model, "messages": messages, "temperature": TEMPERATURE}
+    if tools:
+        kwargs["tools"] = tools
+    if stream:
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+    return kwargs
 
 
 def _complete_once(
@@ -83,8 +107,10 @@ def _complete_once(
 ) -> LLMResponse:
     """非流式补全：tool_calls 与 usage 直接可取。"""
     response = client.chat.completions.create(
-        model=model, messages=messages, temperature=TEMPERATURE, tools=tools
+        **_request_kwargs(model, messages, tools, stream=False)
     )
+    if not response.choices:
+        raise LLMError("服务商返回了空 choices，无法取得回答。")
     message = response.choices[0].message
     tool_calls = [
         ToolCall(id=call.id, name=call.function.name, arguments=call.function.arguments or "")
@@ -110,12 +136,7 @@ def _complete_streaming(
     只是不触发截断，不影响正确性）。
     """
     stream = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=TEMPERATURE,
-        tools=tools,
-        stream=True,
-        stream_options={"include_usage": True},
+        **_request_kwargs(model, messages, tools, stream=True)
     )
     content_parts: list[str] = []
     fragments: dict[int, dict[str, Any]] = {}
@@ -143,10 +164,15 @@ def _complete_streaming(
                     if piece.function.arguments:
                         slot["arguments"].append(piece.function.arguments)
     finally:
-        stream.close()
+        with suppress(Exception):  # 清理路径：关流失败不掩盖正在传播的原始异常
+            stream.close()
+    if fragments and all(isinstance(key, int) for key in fragments):
+        ordered_slots = [fragments[key] for key in sorted(fragments)]
+    else:
+        ordered_slots = list(fragments.values())  # index 缺失（兼容服务端）按到达顺序兜底
     tool_calls = [
         ToolCall(id=slot["id"], name=slot["name"], arguments="".join(slot["arguments"]))
-        for _, slot in sorted(fragments.items())
+        for slot in ordered_slots
     ]
     return LLMResponse(
         message=AssistantMessage(content="".join(content_parts) or None, tool_calls=tool_calls),

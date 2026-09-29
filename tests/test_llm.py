@@ -1,11 +1,11 @@
-"""llm 补全归一化：流式 tool_calls 分片组装、usage 透出、APIError 包装（fake 客户端，无网络）。"""
+"""llm 补全归一化：流式 tool_calls 分片组装、usage 透出、SDK 异常包装（fake 客户端，无网络）。"""
 
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from openai import APIError
+from openai import APIError, OpenAIError
 
 from cra import llm
 
@@ -18,7 +18,11 @@ def _content_chunk(text: str) -> SimpleNamespace:
 
 
 def _tool_piece(
-    index: int, *, call_id: str | None = None, name: str | None = None, arguments: str | None = None
+    index: int | None,
+    *,
+    call_id: str | None = None,
+    name: str | None = None,
+    arguments: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         index=index, id=call_id, function=SimpleNamespace(name=name, arguments=arguments)
@@ -146,3 +150,95 @@ class TestNonStreaming:
 
         with pytest.raises(llm.LLMError, match="boom"):
             llm.complete(_fake_client(create), "test-model", [])
+
+    def test_non_api_openai_error_wrapped_as_llm_error(self) -> None:
+        """Length/ContentFilterFinishReason 等非 APIError 的 SDK 异常也要被包装。"""
+
+        def create(**_: object) -> None:
+            raise OpenAIError("provider exploded")
+
+        with pytest.raises(llm.LLMError, match="provider exploded"):
+            llm.complete(_fake_client(create), "test-model", [])
+
+    def test_empty_choices_raises_llm_error(self) -> None:
+        sdk_response = SimpleNamespace(choices=[], usage=None)
+
+        with pytest.raises(llm.LLMError, match="choices"):
+            llm.complete(_fake_client(lambda **_: sdk_response), "test-model", [])
+
+    def test_tools_none_omitted_from_request(self) -> None:
+        """tools 为 None 时省略字段，不依赖 None 的序列化语义。"""
+        captured: dict[str, object] = {}
+        sdk_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="好", tool_calls=None))],
+            usage=SimpleNamespace(total_tokens=5),
+        )
+
+        def create(**kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return sdk_response
+
+        llm.complete(_fake_client(create), "test-model", [])
+        assert "tools" not in captured
+
+    def test_tools_passed_when_provided(self) -> None:
+        captured: dict[str, object] = {}
+        sdk_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="好", tool_calls=None))],
+            usage=SimpleNamespace(total_tokens=5),
+        )
+        tools = [{"type": "function", "function": {"name": "list_dir"}}]
+
+        def create(**kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return sdk_response
+
+        llm.complete(_fake_client(create), "test-model", [], tools=tools)
+        assert captured["tools"] == tools
+
+    def test_stream_close_failure_does_not_mask_response(self) -> None:
+        class _ExplodingClose:
+            def __init__(self, chunks: list[SimpleNamespace]) -> None:
+                self._chunks = iter(chunks)
+
+            def __iter__(self) -> "_ExplodingClose":
+                return self
+
+            def __next__(self) -> SimpleNamespace:
+                return next(self._chunks)
+
+            def close(self) -> None:
+                raise RuntimeError("close failed")
+
+        chunks = [_content_chunk("正文"), _usage_chunk(9)]
+
+        response = llm.complete(
+            _fake_client(lambda **_: _ExplodingClose(chunks)), "test-model", [], stream=True
+        )
+
+        assert response.message.content == "正文"
+
+    def test_tool_fragments_without_index_keep_arrival_order(self) -> None:
+        chunks = [
+            _tool_chunk([_tool_piece(None, call_id="c1", name="list_dir", arguments="{}")]),
+            _usage_chunk(1),
+        ]
+
+        response = llm.complete(
+            _fake_client(lambda **_: _fake_stream(chunks)()), "test-model", [], stream=True
+        )
+
+        assert [call.name for call in response.message.tool_calls] == ["list_dir"]
+
+
+class TestCreateClient:
+    def test_missing_api_key_raises_llm_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """不依赖 SDK 的 OPENAI_API_KEY 回退（避免把 OpenAI 密钥发往 CRA_BASE_URL）。"""
+        monkeypatch.delenv("SE_CodeAgent", raising=False)
+        with pytest.raises(llm.LLMError, match="SE_CodeAgent"):
+            llm.create_client()
+
+    def test_sdk_retry_disabled_explicitly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SDK 隐式重试显式关闭，重试策略由 M2 在应用层实现。"""
+        monkeypatch.setenv("SE_CodeAgent", "sk-test-key")
+        assert llm.create_client().max_retries == 0
