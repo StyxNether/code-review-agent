@@ -79,6 +79,59 @@ class TestReadFile:
         assert "line401" not in result
         assert "start=401" in result  # 提示模型用 start/end 分段
 
+    def test_explicit_range_exactly_at_limit_ok_with_hint(self, tmp_path: Path) -> None:
+        """分段边界：显式区间恰好 400 行合法（上限只拒绝超出）。"""
+        target = tmp_path / "big.py"
+        target.write_text("\n".join(f"line{i}" for i in range(1, 1001)) + "\n", encoding="utf-8")
+
+        result = fs.read_file(str(target), start=1, end=400)
+
+        assert not result.startswith("错误")
+        assert "1 | line1" in result and "400 | line400" in result
+        assert "start=401" in result
+
+    def test_second_segment_continues_exactly(self, tmp_path: Path) -> None:
+        """分段边界：续段 401-800 行首尾精确，再提示下一段起点。"""
+        target = tmp_path / "big.py"
+        target.write_text("\n".join(f"line{i}" for i in range(1, 1001)) + "\n", encoding="utf-8")
+
+        result = fs.read_file(str(target), start=401, end=800)
+
+        assert "401 | line401" in result
+        assert "800 | line800" in result
+        assert "line400" not in result and "line801" not in result
+        assert "start=801" in result
+
+    def test_last_segment_no_truncation_hint(self, tmp_path: Path) -> None:
+        """分段边界：末段到 EOF 不再提示继续分段。"""
+        target = tmp_path / "big.py"
+        target.write_text("\n".join(f"line{i}" for i in range(1, 1001)) + "\n", encoding="utf-8")
+
+        result = fs.read_file(str(target), start=801)
+
+        assert "801 | line801" in result
+        assert "1000 | line1000" in result
+        assert "已按单次" not in result
+
+    def test_end_without_start_reads_prefix(self, tmp_path: Path) -> None:
+        target = tmp_path / "code.py"
+        target.write_text("\n".join(f"line{i}" for i in range(1, 11)) + "\n", encoding="utf-8")
+
+        result = fs.read_file(str(target), end=2)
+
+        assert "1 | line1" in result
+        assert "2 | line2" in result
+        assert "line3" not in result
+
+    def test_end_zero_structured_error(self, tmp_path: Path) -> None:
+        target = tmp_path / "code.py"
+        target.write_text("a\nb\n", encoding="utf-8")
+
+        result = fs.read_file(str(target), end=0)
+
+        assert result.startswith("错误")
+        assert "1-based 正整数" in result
+
     def test_explicit_range_over_limit_structured_error(self, tmp_path: Path) -> None:
         target = tmp_path / "big.py"
         target.write_text("\n".join(f"line{i}" for i in range(1, 1001)) + "\n", encoding="utf-8")
