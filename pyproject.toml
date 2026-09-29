@@ -30,6 +30,8 @@ dev = [
 
 [tool.ruff]
 line-length = 100
+# tests/fixtures 是预埋的边界样例数据（如故意写错的 syntax_error.py），非业务代码
+extend-exclude = ["tests/fixtures"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

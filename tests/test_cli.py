@@ -1,8 +1,28 @@
-"""cli 渲染单元：分级标记加粗与围栏状态机（不产生终端输出，无网络）。"""
+"""cli 单元：参数解析、分级标记加粗与围栏状态机（不产生终端输出，无网络）。"""
 
+import pytest
 from rich.console import Console
 
-from cra.cli import _emphasize_grade_markers, _in_fence, _StreamingMarkdown
+from cra.cli import _build_parser, _emphasize_grade_markers, _in_fence, _StreamingMarkdown
+
+
+class TestParser:
+    """M2 补齐：CLI 参数解析此前无测试覆盖。"""
+
+    def test_chat_subcommand_parses(self) -> None:
+        args = _build_parser().parse_args(["chat"])
+
+        assert args.command == "chat"
+
+    def test_missing_subcommand_exits_with_usage(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args([])
+
+        assert "chat" in capsys.readouterr().err
+
+    def test_unknown_subcommand_exits(self) -> None:
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["nope"])
 
 
 def test_all_markers_bolded_in_one_segment() -> None:
