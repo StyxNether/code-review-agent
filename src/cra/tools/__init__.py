@@ -57,6 +57,10 @@ class ToolRegistry:
             for tool in self._tools.values()
         ]
 
+    def definitions(self) -> list[Tool]:
+        """返回全部工具定义（供 agent 层包装为框架原生工具；注册顺序保持稳定）。"""
+        return list(self._tools.values())
+
     def dispatch(self, name: str, arguments_json: str) -> str:
         """分发工具调用并返回字符串结果；任何失败都以"错误：…"结构化文本回传（§5）。
 

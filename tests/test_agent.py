@@ -1,15 +1,114 @@
-"""Agent 循环：消息组装、工具分发、轮次上限、轮次原子截断、中断回滚（全 mock，无网络）。"""
+"""Agent 循环（create_agent 栈）：消息正本维护、工具桥接与结构化错误、轮次上限
+middleware、请求侧轮次原子截断、中断回滚（全假模型，无网络）。"""
 
 import json
-from collections.abc import Callable
 from typing import Any
 
 import pytest
+from langchain.agents import create_agent
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from pydantic import Field
 
 from cra import llm
-from cra.agent import MAX_TOOL_ROUNDS, Agent, truncate_rounds
+from cra.agent import (
+    MAX_TOOL_ROUNDS,
+    Agent,
+    _bridge_tool,
+    _ContextTrimMiddleware,
+    _MaxToolRoundsMiddleware,
+    _ToolCallbacksMiddleware,
+    truncate_rounds,
+)
 from cra.prompts import SYSTEM_PROMPT
 from cra.tools import ToolRegistry
+
+
+class ScriptedChatModel(BaseChatModel):
+    """按脚本回放消息的假模型：记录收到的请求与每次 bind_tools 的工具集。
+
+    脚本项为 AIMessage（正常回放）或 Exception 实例（到达时抛出，模拟请求失败/
+    中断）。派生类实现 _stream 即获得流式行为。
+    """
+
+    responses: list[Any] = Field(default_factory=list)
+    cursor: int = 0
+    requests: list[list[BaseMessage]] = Field(default_factory=list)
+    bound_tools: list[list[Any]] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-fake"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "ScriptedChatModel":
+        self.bound_tools.append(list(tools))
+        return self
+
+    def bind(self, **kwargs: Any) -> "ScriptedChatModel":
+        # 框架在请求无工具可绑时的路径（去工具后的模型调用）：记录为空绑定
+        self.bound_tools.append([])
+        return self
+
+    def _next_response(self, messages: list[BaseMessage]) -> Any:
+        """取出下一条脚本项并记录请求（_generate/_stream 共用）。"""
+        self.requests.append(list(messages))
+        response = self.responses[self.cursor]
+        self.cursor += 1
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    def _generate(
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> ChatResult:
+        response = self._next_response(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=response)])
+
+
+class StreamingScriptedChatModel(ScriptedChatModel):
+    """带流式的假模型：文本按 3 段切片（末块带 finish_reason），usage 独立末块。"""
+
+    def _stream(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> Any:
+        response = self._next_response(list(messages))
+        if response.tool_calls:
+            # tool_call_chunks 聚合后须还原出完整 tool_calls（ToolNode 据此执行）
+            for call in response.tool_calls:
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content="",
+                        tool_call_chunks=[
+                            {
+                                "name": call["name"],
+                                "args": json.dumps(call["args"]),
+                                "id": call["id"],
+                                "index": 0,
+                                "type": "tool_call_chunk",
+                            }
+                        ],
+                    )
+                )
+        else:
+            text = response.text
+            step = max(1, len(text) // 3)
+            pieces = [text[i : i + step] for i in range(0, len(text), step)] or [""]
+            for i, piece in enumerate(pieces):
+                extra: dict[str, Any] = {}
+                if i == len(pieces) - 1 and response.response_metadata.get("finish_reason"):
+                    extra["response_metadata"] = response.response_metadata
+                yield ChatGenerationChunk(message=AIMessageChunk(content=piece, **extra))
+        if response.usage_metadata:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content="", usage_metadata=response.usage_metadata)
+            )
 
 
 def make_registry() -> ToolRegistry:
@@ -28,378 +127,467 @@ def make_registry() -> ToolRegistry:
     return registry
 
 
-def tool_response(
-    call_id: str, name: str, arguments: dict[str, Any], total: int | None = None
-) -> llm.LLMResponse:
-    message = llm.AssistantMessage(
-        content=None,
-        tool_calls=[llm.ToolCall(id=call_id, name=name, arguments=json.dumps(arguments))],
+def tool_response(call_id: str, name: str, arguments: dict[str, Any]) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "args": arguments, "id": call_id, "type": "tool_call"}],
     )
-    return llm.LLMResponse(message=message, total_tokens=total)
 
 
 def text_response(
-    text: str, total: int | None = None, finish_reason: str | None = "stop"
-) -> llm.LLMResponse:
-    message = llm.AssistantMessage(content=text, tool_calls=[])
-    return llm.LLMResponse(
-        message=message, total_tokens=total, finish_reason=finish_reason
+    text: str,
+    finish_reason: str | None = "stop",
+    total_tokens: int | None = None,
+) -> AIMessage:
+    metadata: dict[str, Any] = {"finish_reason": finish_reason} if finish_reason else {}
+    usage = (
+        {"input_tokens": 0, "output_tokens": 0, "total_tokens": total_tokens}
+        if total_tokens is not None
+        else None
     )
+    return AIMessage(content=text, response_metadata=metadata, usage_metadata=usage)
 
 
 def make_agent(
-    monkeypatch: pytest.MonkeyPatch,
-    script: list[llm.LLMResponse],
+    script: list[Any],
     *,
+    registry: ToolRegistry | None = None,
     max_context_tokens: int | None = None,
-) -> tuple[Agent, list[dict[str, Any]]]:
-    """注入 fake llm.complete（按脚本回放），返回 (agent, 每次请求的参数记录)。"""
-    calls: list[dict[str, Any]] = []
-
-    def fake_complete(
-        client: object,
-        model: str,
-        messages: list[dict[str, Any]],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-        stream: bool = False,
-        on_delta: Callable[[str], None] | None = None,
-    ) -> llm.LLMResponse:
-        calls.append({"tools": tools, "messages": [dict(m) for m in messages]})
-        response = script.pop(0)
-        # 模拟流式行为：纯文本回答会把增量回调出去（工具轮的增量由真实 SDK 决定，不模拟）
-        if on_delta is not None and response.message.content and not response.message.tool_calls:
-            on_delta(response.message.content)
-        return response
-
-    monkeypatch.setattr(llm, "complete", fake_complete)
-    kwargs: dict[str, Any] = {
-        "client": object(),
-        "model": "test-model",
-        "registry": make_registry(),
-    }
+    max_tool_rounds: int = MAX_TOOL_ROUNDS,
+    streaming: bool = False,
+) -> tuple[Agent, ScriptedChatModel]:
+    """构建注入假模型的 Agent，返回 (agent, fake)——fake.requests/bound_tools 供断言。"""
+    fake: ScriptedChatModel = (
+        StreamingScriptedChatModel(responses=script) if streaming else ScriptedChatModel(responses=script)
+    )
+    kwargs: dict[str, Any] = {"model": fake, "registry": registry or make_registry()}
     if max_context_tokens is not None:
         kwargs["max_context_tokens"] = max_context_tokens
-    return Agent(**kwargs), calls
+    if max_tool_rounds != MAX_TOOL_ROUNDS:
+        kwargs["max_tool_rounds"] = max_tool_rounds
+    return Agent(**kwargs), fake
 
 
-def make_round(user_text: str, *, with_tools: bool = True, answer: str = "done") -> list[dict[str, Any]]:
+def make_round(user_text: str, *, with_tools: bool = True, answer: str = "done") -> list[BaseMessage]:
     """构造一个结构完整的历史轮次：user → assistant(tool_calls) → tool → assistant。"""
-    messages: list[dict[str, Any]] = [{"role": "user", "content": user_text}]
+    messages: list[BaseMessage] = [HumanMessage(content=user_text)]
     if with_tools:
-        messages.append(
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": f"call-{user_text[:8]}",
-                        "type": "function",
-                        "function": {"name": "echo", "arguments": json.dumps({"text": "x"})},
-                    }
-                ],
-            }
-        )
-        messages.append({"role": "tool", "tool_call_id": f"call-{user_text[:8]}", "content": "ECHO:x"})
-    messages.append({"role": "assistant", "content": answer})
+        call_id = f"call-{user_text[:8]}"
+        messages.append(tool_response(call_id, "echo", {"text": "x"}))
+        messages.append(ToolMessage(content="ECHO:x", tool_call_id=call_id))
+    messages.append(AIMessage(content=answer))
     return messages
 
 
-def assert_rounds_atomic(messages: list[dict[str, Any]]) -> None:
+def assert_rounds_atomic(messages: list[BaseMessage]) -> None:
     """消息序列合法性：每条 tool 消息都对应仍在等待结果的 tool_call，且最终无悬挂。"""
     pending: set[str] = set()
     for message in messages:
-        if message["role"] == "assistant":
-            for call in message.get("tool_calls") or []:
+        if isinstance(message, AIMessage):
+            for call in message.tool_calls:
                 pending.add(call["id"])
-        elif message["role"] == "tool":
-            assert message["tool_call_id"] in pending, f"tool 消息悬挂：{message}"
-            pending.discard(message["tool_call_id"])
+        elif isinstance(message, ToolMessage):
+            assert message.tool_call_id in pending, f"tool 消息悬挂：{message}"
+            pending.discard(message.tool_call_id)
     assert not pending, f"assistant 的 tool_calls 没有对应 tool 结果：{pending}"
 
 
+def shape(messages: list[BaseMessage]) -> list[tuple[str, Any]]:
+    """消息序列的语义形状（类型 + 内容）：框架会给消息原位分配 id，不做对象等值。"""
+    return [(type(m).__name__, m.content) for m in messages]
+
+
+def _ki_handler(text: str) -> str:
+    raise KeyboardInterrupt
+
+
 class TestRunBasics:
-    def test_initial_messages_are_system_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        agent, _ = make_agent(monkeypatch, [])
-        assert agent.messages == [{"role": "system", "content": SYSTEM_PROMPT}]
+    def test_initial_messages_are_system_only(self) -> None:
+        agent, _ = make_agent([])
 
-    def test_reset_restores_system_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        agent, _ = make_agent(monkeypatch, [text_response("答")])
+        assert agent.messages == [SystemMessage(content=SYSTEM_PROMPT)]
+
+    def test_reset_restores_system_only(self) -> None:
+        agent, _ = make_agent([text_response("答")])
         agent.run("x")
-        agent.reset()
-        assert agent.messages == [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    def test_plain_answer_assembles_messages(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        agent, calls = make_agent(monkeypatch, [text_response("结论")])
+        agent.reset()
+
+        assert agent.messages == [SystemMessage(content=SYSTEM_PROMPT)]
+
+    def test_plain_answer_assembles_master(self) -> None:
+        agent, _ = make_agent([text_response("结论")])
 
         result = agent.run("审查 agent.py")
 
         assert result == "结论"
-        assert calls[0]["messages"] == [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "审查 agent.py"},
+        assert shape(agent.messages) == [
+            ("SystemMessage", SYSTEM_PROMPT),
+            ("HumanMessage", "审查 agent.py"),
+            ("AIMessage", "结论"),
         ]
-        assert agent.messages[-1] == {"role": "assistant", "content": "结论"}
 
-    def test_tool_round_dispatch_and_pairing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        agent, _ = make_agent(
-            monkeypatch, [tool_response("c1", "echo", {"text": "hi"}), text_response("结论")]
-        )
-        seen: list[tuple[str, str]] = []
-
-        result = agent.run("帮我", on_tool=lambda name, args: seen.append((name, args)))
-
-        assert result == "结论"
-        assert seen == [("echo", json.dumps({"text": "hi"}))]
-        assert [m["role"] for m in agent.messages] == [
-            "system", "user", "assistant", "tool", "assistant",
-        ]
-        assistant_msg = agent.messages[2]
-        assert assistant_msg["tool_calls"][0]["function"]["name"] == "echo"
-        tool_msg = agent.messages[3]
-        assert tool_msg["tool_call_id"] == "c1"
-        assert tool_msg["content"] == "ECHO:hi"
-        assert_rounds_atomic(agent.messages)
-
-    def test_unknown_tool_error_returned_to_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        agent, _ = make_agent(
-            monkeypatch, [tool_response("c1", "no_such_tool", {}), text_response("好")]
-        )
+    def test_system_prompt_injected_via_system_channel(self) -> None:
+        """系统提示词经框架 system 通道每次注入（请求首条消息），不落入图状态。"""
+        agent, fake = make_agent([text_response("结论")])
 
         agent.run("x")
 
-        tool_msg = agent.messages[3]
-        assert tool_msg["content"].startswith("错误")
-        assert "未注册" in tool_msg["content"]
+        assert isinstance(fake.requests[0][0], SystemMessage)
+        assert fake.requests[0][0].content == SYSTEM_PROMPT
+        assert [m.content for m in fake.requests[0][1:]] == ["x"]
 
-    def test_delta_callback_fires_for_final_answer(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_tool_round_dispatch_and_pairing(self) -> None:
+        agent, _ = make_agent([tool_response("c1", "echo", {"text": "hi"}), text_response("结论")])
+
+        result = agent.run("帮我")
+
+        assert result == "结论"
+        assert [type(m).__name__ for m in agent.messages] == [
+            "SystemMessage", "HumanMessage", "AIMessage", "ToolMessage", "AIMessage",
+        ]
+        assert agent.messages[2].tool_calls[0]["name"] == "echo"
+        assert agent.messages[3].content == "ECHO:hi"
+        assert_rounds_atomic(agent.messages)
+
+    def test_tool_callbacks_fire_with_json_args(self) -> None:
+        agent, _ = make_agent([tool_response("c1", "echo", {"text": "hi"}), text_response("好")])
+        tools: list[tuple[str, str]] = []
+        results: list[str] = []
+
+        agent.run(
+            "x", on_tool=lambda name, args: tools.append((name, args)), on_tool_result=results.append
+        )
+
+        assert tools == [("echo", json.dumps({"text": "hi"}, ensure_ascii=False))]
+        assert json.loads(tools[0][1]) == {"text": "hi"}
+        assert results == ["ECHO:hi"]
+
+    def test_multiple_tool_calls_dispatched_in_order(self) -> None:
+        script = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "echo", "args": {"text": "一"}, "id": "c1", "type": "tool_call"},
+                    {"name": "echo", "args": {"text": "二"}, "id": "c2", "type": "tool_call"},
+                ],
+            ),
+            text_response("结论"),
+        ]
+        agent, _ = make_agent(script)
+        tools: list[tuple[str, str]] = []
+
+        agent.run("x", on_tool=lambda name, args: tools.append((name, args)))
+
+        assert [args for _, args in tools] == [
+            json.dumps({"text": "一"}, ensure_ascii=False),
+            json.dumps({"text": "二"}, ensure_ascii=False),
+        ]
+        assert agent.messages[4].content == "ECHO:二"
+        assert_rounds_atomic(agent.messages)
+
+    def test_unknown_tool_error_prefix_reaches_model(self) -> None:
+        """未知工具名：模型必须收到"错误："前缀的结构化文案（协议锁定点）。"""
+        agent, fake = make_agent([tool_response("c1", "no_such_tool", {}), text_response("好")])
+
+        agent.run("x")
+
+        tool_messages = [m for m in fake.requests[1] if isinstance(m, ToolMessage)]
+        assert len(tool_messages) == 1
+        assert tool_messages[0].content.startswith("错误")
+        assert "未注册" in tool_messages[0].content
+        assert "no_such_tool" in tool_messages[0].content
+
+    def test_unknown_tool_error_reported_via_callback(self) -> None:
+        agent, _ = make_agent([tool_response("c1", "no_such_tool", {}), text_response("好")])
+        results: list[str] = []
+
+        agent.run("x", on_tool_result=results.append)
+
+        assert results and results[0].startswith("错误")
+
+    def test_delta_callback_fires_for_final_answer(self) -> None:
         deltas: list[str] = []
-        agent, _ = make_agent(monkeypatch, [text_response("流式回答")])
+        agent, _ = make_agent([text_response("流式回答")], streaming=True)
+
         agent.run("x", on_delta=deltas.append)
 
-        assert deltas == ["流式回答"]
+        assert "".join(deltas) == "流式回答"
+        assert len(deltas) >= 2  # 分片到达，而非一次性全文
 
-    def test_length_truncated_answer_gets_visible_notice(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_display_model_name_falls_back_to_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_MODEL", "env-model")
+
+        agent, _ = make_agent([])
+
+        assert agent.model == "env-model"
+
+
+class TestFinalAnswerHandling:
+    def test_length_truncated_answer_gets_visible_notice(self) -> None:
         """M1 挂账：finish_reason=length 的回答不能被静默当完整结论。
 
-        提示须同时到达三处：渲染增量（cli 只认 on_delta）、返回值、messages
+        提示须同时到达三处：渲染增量（cli 只认 on_delta）、返回值、正本
         （保证"继续"追问时模型可见截断状态）。
         """
         deltas: list[str] = []
-        agent, _ = make_agent(monkeypatch, [text_response("被截断的回答", finish_reason="length")])
+        agent, _ = make_agent(
+            [text_response("被截断的回答", finish_reason="length")], streaming=True
+        )
 
         result = agent.run("x", on_delta=deltas.append)
 
         assert result.startswith("被截断的回答")
         assert "截断" in result
-        assert deltas[-1].strip().startswith("⚠")  # 提示经增量渲染
-        assert agent.messages[-1]["content"] == result  # 入库文本含提示
+        assert deltas[-1].strip().startswith("⚠")
+        assert agent.messages[-1].content == result
 
-    def test_normal_stop_reason_adds_no_notice(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        agent, _ = make_agent(monkeypatch, [text_response("正常回答")])
+    def test_normal_stop_reason_adds_no_notice(self) -> None:
+        agent, _ = make_agent([text_response("正常回答")])
 
-        result = agent.run("x")
+        assert agent.run("x") == "正常回答"
 
-        assert result == "正常回答"
+    def test_empty_final_answer_raises_and_rolls_back(self) -> None:
+        agent, _ = make_agent([text_response("  ")])
 
-    def test_final_call_after_tools_carries_full_history(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        agent, calls = make_agent(
-            monkeypatch, [tool_response("c1", "echo", {"text": "hi"}), text_response("结论")]
+        with pytest.raises(llm.LLMError, match="空回答"):
+            agent.run("x")
+
+        assert agent.messages == [SystemMessage(content=SYSTEM_PROMPT)]
+
+    def test_final_call_carries_full_history(self) -> None:
+        agent, fake = make_agent(
+            [tool_response("c1", "echo", {"text": "hi"}), text_response("结论")]
         )
 
         agent.run("x")
 
-        # 最终回答请求发生在追加 assistant 回答之前，因此携带的是除末条外的完整历史
-        assert calls[1]["messages"] == agent.messages[:-1]
+        # 最终回答请求发生在追加 assistant 回答之前：正本去掉系统消息与末条回答
+        assert fake.requests[-1] == [SystemMessage(content=SYSTEM_PROMPT), *agent.messages[1:-1]]
 
 
 class TestMaxToolRounds:
-    def test_forces_conclusion_after_max_rounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        script = [
-            tool_response(f"c{i}", "echo", {"text": str(i)})
-            for i in range(MAX_TOOL_ROUNDS + 1)
-        ]
+    def test_forces_conclusion_after_max_rounds(self) -> None:
+        script = [tool_response(f"c{i}", "echo", {"text": str(i)}) for i in range(MAX_TOOL_ROUNDS)]
         script.append(text_response("最终结论"))
-        agent, calls = make_agent(monkeypatch, script)
+        agent, _ = make_agent(script)
 
         result = agent.run("x")
 
         assert result == "最终结论"
-        assert len(calls) == MAX_TOOL_ROUNDS + 2  # 10 轮工具 + 1 次超限响应 + 1 次强制收尾
-        assert calls[-1]["tools"] is None  # 强制收尾不带工具，保证终止
-        assert all(call["tools"] is not None for call in calls[:-1])
-        tool_messages = [m for m in agent.messages if m["role"] == "tool"]
-        assert len(tool_messages) == MAX_TOOL_ROUNDS  # 超限那次 tool_calls 未落库
-        assert any(m["role"] == "user" and "上限" in m["content"] for m in agent.messages)
+        tool_messages = [m for m in agent.messages if isinstance(m, ToolMessage)]
+        assert len(tool_messages) == MAX_TOOL_ROUNDS
+        assert agent.messages[-1].content == "最终结论"
         assert_rounds_atomic(agent.messages)
+
+    def test_forced_call_has_no_tools_and_injected_directive(self) -> None:
+        """达限机制锁定：下一次模型调用去工具 + 注入收尾指令（§3.1(4)）。"""
+        script = [tool_response(f"c{i}", "echo", {"text": str(i)}) for i in range(MAX_TOOL_ROUNDS)]
+        script.append(text_response("最终结论"))
+        agent, fake = make_agent(script)
+
+        agent.run("x")
+
+        assert fake.bound_tools[-1] == []  # 去工具
+        assert fake.bound_tools[:-1] and all(fake.bound_tools[:-1])  # 其余调用都带工具
+        directive = [m for m in fake.requests[-1] if isinstance(m, HumanMessage)][-1]
+        assert "上限" in directive.content
+
+    def test_directive_not_persisted_in_master(self) -> None:
+        """收尾指令只在请求侧（D14）：正本不出现注入的 user 消息。"""
+        script = [tool_response(f"c{i}", "echo", {"text": str(i)}) for i in range(MAX_TOOL_ROUNDS)]
+        script.append(text_response("最终结论"))
+        agent, _ = make_agent(script)
+
+        agent.run("x")
+
+        assert not any(isinstance(m, HumanMessage) and "上限" in m.content for m in agent.messages)
+
+    def test_round_counting_resets_per_run(self) -> None:
+        """轮次计数只覆盖本轮：上一轮用过的工具轮不累积进本次限额。"""
+        agent, _ = make_agent(
+            [
+                tool_response("c1", "echo", {"text": "1"}),
+                text_response("答1"),
+                tool_response("c2", "echo", {"text": "2"}),
+                text_response("答2"),
+            ]
+        )
+
+        assert agent.run("第一轮") == "答1"
+        assert agent.run("第二轮") == "答2"  # 若计数跨轮累积，第二轮会被立即强制收尾
+
+    def test_recursion_limit_scales_with_rounds(self) -> None:
+        agent, _ = make_agent([], max_tool_rounds=3)
+
+        assert agent.recursion_limit == 2 * 3 + 5
 
 
 class TestTruncateRounds:
     def test_under_threshold_untouched(self) -> None:
-        messages = [{"role": "system", "content": "S"}, *make_round("u1", with_tools=False)]
+        messages = make_round("u1", with_tools=False)
         result = truncate_rounds(messages, usage_total_tokens=100, max_tokens=200)
         assert result == messages
         assert result is not messages  # 未触发截断也返回副本（纯函数语义）
 
     def test_none_usage_untouched(self) -> None:
-        messages = [{"role": "system", "content": "S"}, *make_round("u1", with_tools=False)]
+        messages = make_round("u1", with_tools=False)
         assert truncate_rounds(messages, usage_total_tokens=None, max_tokens=10) == messages
 
     def test_exactly_at_threshold_untouched(self) -> None:
         """边界：usage == 阈值不触发截断（仅"超过"才丢轮次）。"""
-        messages = [{"role": "system", "content": "S"}, *make_round("u1", with_tools=False)]
+        messages = make_round("u1", with_tools=False)
 
         result = truncate_rounds(messages, usage_total_tokens=200, max_tokens=200)
 
         assert result == messages
 
     def test_one_token_over_threshold_drops_oldest(self) -> None:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": "S"}]
-        messages += make_round("u1", with_tools=False)
-        messages += make_round("u2", with_tools=False)
+        messages = [*make_round("u1", with_tools=False), *make_round("u2", with_tools=False)]
 
         result = truncate_rounds(messages, usage_total_tokens=201, max_tokens=200)
 
-        assert result[1]["content"] == "u2"  # 超过 1 token 也按轮次整体丢最旧一轮
+        assert result[0].content == "u2"  # 超过 1 token 也按轮次整体丢最旧一轮
 
     def test_estimate_boundary_stops_dropping(self) -> None:
-        """边界：估算降到阈值以内即停（两轮各恰 1000 字符 ≈ 500 tokens，阈值 500）。
-
-        丢一轮后估算 == 阈值，不再继续丢；估算只决定额外丢弃量（触发以真实 usage 为准）。
-        """
-        messages: list[dict[str, Any]] = [{"role": "system", "content": "S"}]
-        messages += make_round("u" * 996, with_tools=False)
-        messages += make_round("v" * 996, with_tools=False)
+        """边界：估算降到阈值以内即停（两轮各恰 1000 字符 ≈ 500 tokens，阈值 500）。"""
+        messages = [
+            *make_round("u" * 996, with_tools=False),
+            *make_round("v" * 996, with_tools=False),
+        ]
 
         result = truncate_rounds(messages, usage_total_tokens=100_000, max_tokens=500)
 
-        assert [m["role"] for m in result].count("user") == 1
-        assert result[-1]["content"] == "done"
+        assert sum(isinstance(m, HumanMessage) for m in result) == 1
+        assert result[-1].content == "done"
 
     def test_over_threshold_drops_oldest_round_atomically(self) -> None:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": "S"}]
-        messages += make_round("u1" * 200)  # 长轮次（含 tool_calls/tool 配对）
-        messages += make_round("u2", with_tools=False)
+        messages = [*make_round("u1" * 200), *make_round("u2", with_tools=False)]
         original = list(messages)
 
         result = truncate_rounds(messages, usage_total_tokens=50_000, max_tokens=100)
 
-        assert result[0] == {"role": "system", "content": "S"}  # 系统提示词保留
-        assert result[1] == {"role": "user", "content": "u2"}  # 第一轮整体消失
-        assert any(m["content"] == "done" for m in result)  # 最后一轮完整保留
+        assert result[0].content == "u2"  # 第一轮整体消失
+        assert any(m.content == "done" for m in result)  # 最后一轮完整保留
         assert_rounds_atomic(result)  # tool_calls/tool 配对不被拆散
         assert messages == original  # 纯函数：不改入参
 
     def test_never_drops_last_round(self) -> None:
-        messages = [{"role": "system", "content": "S"}, *make_round("u1" * 400)]
+        messages = make_round("u1" * 400)
 
         result = truncate_rounds(messages, usage_total_tokens=999_999, max_tokens=10)
 
         assert result == messages  # 单轮不可拆：宁可超限也不产生非法结构
         assert result is not messages  # 且始终返回副本（纯函数语义）
 
-    def test_directive_user_message_is_a_valid_boundary(self) -> None:
-        # max-rounds 指令也是 user 消息：以它为界丢弃旧前缀后结构仍合法
-        messages: list[dict[str, Any]] = [{"role": "system", "content": "S"}]
-        messages += make_round("u1" * 300)
-        messages.append({"role": "user", "content": "工具调用已达上限（10 轮）……"})
-        messages.append({"role": "assistant", "content": "结论"})
-
-        result = truncate_rounds(messages, usage_total_tokens=10_000, max_tokens=50)
-
-        assert result[1]["content"].startswith("工具调用已达上限")
-        assert_rounds_atomic(result)
-
     def test_estimate_keeps_dropping_until_under_threshold(self) -> None:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": "S"}]
-        messages += make_round("u1" * 2000, with_tools=False)
-        messages += make_round("u2" * 2000, with_tools=False)
-        messages += make_round("u3" * 2000, with_tools=False)
+        messages = [
+            *make_round("u1" * 2000, with_tools=False),
+            *make_round("u2" * 2000, with_tools=False),
+            *make_round("u3" * 2000, with_tools=False),
+        ]
 
         result = truncate_rounds(messages, usage_total_tokens=100_000, max_tokens=1500)
 
-        # 每轮约 2004 字符 → 估算约 1002 tokens；1500 阈值下应一直丢到只剩最后一轮
-        assert [m["role"] for m in result].count("user") == 1
-        assert result[-1]["content"] == "done"
+        assert sum(isinstance(m, HumanMessage) for m in result) == 1
+        assert result[-1].content == "done"
 
-    def test_run_truncates_between_turns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+class TestContextTrimIntegration:
+    def test_trim_applies_to_request_but_master_keeps_full_history(self) -> None:
+        """M4 新语义锁定：截断发生在请求侧，正本（D14）保留完整历史。"""
         script = [
-            tool_response("c1", "echo", {"text": "x"}, total=50_000),
-            text_response("答1", total=50_000),
-            tool_response("c2", "echo", {"text": "y"}, total=50_000),
-            text_response("答2", total=50_000),
+            tool_response("c1", "echo", {"text": "x"}),
+            text_response("答1", total_tokens=50_000),
+            text_response("答2", total_tokens=50_000),
         ]
-        agent, _ = make_agent(monkeypatch, script, max_context_tokens=100)
+        agent, fake = make_agent(script, max_context_tokens=100)
 
         agent.run("第一轮")
         agent.run("第二轮")
 
-        assert agent.messages[0]["role"] == "system"
-        assert agent.messages[1]["content"] == "第二轮"  # 第一轮已整体丢弃
-        assert agent.messages[-1] == {"role": "assistant", "content": "答2"}
+        # 第二轮首次请求：第一轮已按完整轮次从请求视图丢弃（视图首条即本轮 user）
+        second_first = fake.requests[2][1]  # [0] 是 system 通道消息
+        assert second_first.content == "第二轮"
+        assert all(not isinstance(m, AIMessage) for m in fake.requests[2][1:])
+        # 正本保留完整历史（含第一轮），仅追加本轮新增
+        assert [type(m).__name__ for m in agent.messages] == [
+            "SystemMessage", "HumanMessage", "AIMessage", "ToolMessage", "AIMessage",
+            "HumanMessage", "AIMessage",
+        ]
+        assert agent.messages[-1].content == "答2"
         assert_rounds_atomic(agent.messages)
+
+    def test_missing_usage_never_trims(self) -> None:
+        """usage 缺失（兼容端点未回）安全降级：截断不触发，请求视图不裁剪。"""
+        script = [
+            tool_response("c1", "echo", {"text": "x"}),
+            text_response("答1", total_tokens=None),
+            text_response("答2", total_tokens=None),
+        ]
+        agent, fake = make_agent(script, max_context_tokens=10)
+
+        agent.run("第一轮")
+        agent.run("第二轮")
+
+        assert fake.requests[2][1].content == "第一轮"  # 请求仍携带完整历史
+        assert len(agent.messages) == 7
+
+    def test_trim_middleware_unit(self) -> None:
+        """middleware 直接单测：构造 ModelRequest 验证裁剪行为与请求侧语义。"""
+        from langchain.agents.middleware import ModelRequest
+
+        middleware = _ContextTrimMiddleware(max_context_tokens=100)
+        state_messages = [*make_round("u1" * 200), *make_round("u2", with_tools=False)]
+        for message in state_messages:
+            if isinstance(message, AIMessage) and not message.tool_calls:
+                message.usage_metadata = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 50_000}
+                break
+        request = ModelRequest(
+            model=ScriptedChatModel(responses=[]), messages=list(state_messages), state={"messages": state_messages}
+        )
+        captured: dict[str, Any] = {}
+
+        def handler(request: ModelRequest) -> str:
+            captured["messages"] = list(request.messages)
+            return "ok"
+
+        result = middleware.wrap_model_call(request, handler)
+
+        assert result == "ok"
+        assert captured["messages"][0].content == "u2"  # 请求视图已裁剪
+        assert state_messages[0].content == "u1" * 200  # 传入的列表（正本侧）不动
 
 
 class TestInterrupt:
-    def test_keyboard_interrupt_rolls_back_to_prefix(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        agent = Agent(client=object(), model="test-model", registry=make_registry())
+    def test_keyboard_interrupt_rolls_back_to_prefix(self) -> None:
+        agent, fake = make_agent([])
         agent.messages += make_round("u1", with_tools=False, answer="已答")  # 预置合法历史
-        attempts = {"count": 0}
-
-        def fake_complete(*args: object, **kwargs: object) -> llm.LLMResponse:
-            attempts["count"] += 1
-            if attempts["count"] == 1:
-                return tool_response("c9", "echo", {"text": "x"})
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(llm, "complete", fake_complete)
+        fake.responses.extend([tool_response("c9", "echo", {"text": "x"}), KeyboardInterrupt()])
 
         with pytest.raises(KeyboardInterrupt):
             agent.run("第二轮")
 
-        assert attempts["count"] == 2  # 中断发生在第二个（工具轮）请求上
-        assert agent.messages == [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "u1"},
-            {"role": "assistant", "content": "已答"},
+        # 中断发生在第二个（工具轮）请求上；正本回滚到本轮开始前的完整历史
+        assert fake.cursor == 2
+        assert shape(agent.messages) == [
+            ("SystemMessage", SYSTEM_PROMPT),
+            ("HumanMessage", "u1"),
+            ("AIMessage", "已答"),
         ]
 
-    def test_keyboard_interrupt_on_first_request_rolls_back_user_input(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        agent = Agent(client=object(), model="test-model", registry=make_registry())
-
-        def fake_complete(*args: object, **kwargs: object) -> llm.LLMResponse:
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(llm, "complete", fake_complete)
+    def test_keyboard_interrupt_on_first_request_rolls_back_user_input(self) -> None:
+        agent, _ = make_agent([KeyboardInterrupt()])
 
         with pytest.raises(KeyboardInterrupt):
             agent.run("刚输入的话")
 
-        assert agent.messages == [{"role": "system", "content": SYSTEM_PROMPT}]
+        assert agent.messages == [SystemMessage(content=SYSTEM_PROMPT)]
 
-    def test_interrupt_during_tool_execution_after_truncation(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """回归（验收走查发现）：截断替换 messages 后，位置索引回滚会失位。
-
-        场景：本轮第一个请求触发截断（丢弃旧轮次、列表变短）→ 工具执行中 Ctrl+C
-        → 回滚必须按"本轮起始 user 消息"定位，否则残留孤儿 tool_calls（下轮 400）。
-        """
-        registry = ToolRegistry()
-
-        def ki_handler(text: str) -> str:
-            raise KeyboardInterrupt
-
+    def test_interrupt_during_tool_execution_rolls_back(self) -> None:
+        """工具执行中的 Ctrl+C（BaseException 不被工具兜底吞掉）：本轮整体作废。"""
+        registry = make_registry()
         registry.register(
             name="ki",
             description="执行时立即中断",
@@ -408,49 +596,98 @@ class TestInterrupt:
                 "properties": {"text": {"type": "string"}},
                 "required": ["text"],
             },
-            handler=ki_handler,
+            handler=_ki_handler,
         )
-        agent = Agent(
-            client=object(), model="test-model", registry=registry, max_context_tokens=100
-        )
+        agent, _ = make_agent([tool_response("c9", "ki", {"text": "x"})], registry=registry)
         agent.messages += make_round("u1", with_tools=False, answer="已答")
-        script = [tool_response("c9", "ki", {"text": "x"}, total=50_000)]
-        monkeypatch.setattr(llm, "complete", lambda *args, **kwargs: script.pop(0))
 
         with pytest.raises(KeyboardInterrupt):
             agent.run("第二轮")
 
-        # 第一轮已被截断丢弃（usage 超阈值）；中断回滚再把"第二轮"整体作废——
-        # 旧实现此处会残留 [system, 第二轮, 孤儿 tool_calls]（下轮 API 400）
-        assert agent.messages == [{"role": "system", "content": SYSTEM_PROMPT}]
-        assert_rounds_atomic(agent.messages)
-
-    def test_llm_error_rolls_back_round(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        agent = Agent(client=object(), model="test-model", registry=make_registry())
-        agent.messages += make_round("u1", with_tools=False, answer="已答")
-
-        def failing_complete(*args: object, **kwargs: object) -> llm.LLMResponse:
-            raise llm.LLMError("网络中断")
-
-        monkeypatch.setattr(llm, "complete", failing_complete)
-
-        with pytest.raises(llm.LLMError, match="网络中断"):
-            agent.run("第二轮")
-
-        # 请求失败同样作废本轮：不留半截消息污染后续对话
-        assert agent.messages == [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "u1"},
-            {"role": "assistant", "content": "已答"},
+        assert shape(agent.messages) == [
+            ("SystemMessage", SYSTEM_PROMPT),
+            ("HumanMessage", "u1"),
+            ("AIMessage", "已答"),
         ]
 
-    def test_empty_final_answer_raises_readable_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        agent, _ = make_agent(monkeypatch, [text_response("  ")])
+    def test_unexpected_error_propagates_unchanged_and_rolls_back(self) -> None:
+        """非 SDK/框架异常原样上抛（不伪装成 LLMError），本轮同样作废。"""
+        agent, fake = make_agent([RuntimeError("代码缺陷")])
+        agent.messages += make_round("u1", with_tools=False, answer="已答")
 
-        with pytest.raises(llm.LLMError, match="空回答"):
+        with pytest.raises(RuntimeError, match="代码缺陷"):
+            agent.run("第二轮")
+
+        assert shape(agent.messages) == [
+            ("SystemMessage", SYSTEM_PROMPT),
+            ("HumanMessage", "u1"),
+            ("AIMessage", "已答"),
+        ]
+        assert fake.cursor == 1
+
+    def test_recursion_limit_backstop_translated_as_llm_error(self) -> None:
+        """护栏：轮次 middleware 失效时 recursion_limit 触发，翻译为可读 LLMError 并回滚。"""
+        registry = make_registry()
+        agent, _ = make_agent([], registry=registry, max_tool_rounds=1)
+        agent._graph = _build_graph_without_rounds_guard(agent)
+
+        with pytest.raises(llm.LLMError, match="recursion_limit"):
             agent.run("x")
+        assert shape(agent.messages) == [("SystemMessage", SYSTEM_PROMPT)]
 
-        # 空回答按本轮作废处理：不写入空 assistant 消息，也不静默吞掉（§3.4）
-        assert agent.messages == [{"role": "system", "content": SYSTEM_PROMPT}]
+
+class _AlwaysToolCallsModel(BaseChatModel):
+    """永远请求 echo 工具的假模型（配合失效的轮次 middleware 触发 recursion_limit）。"""
+
+    @property
+    def _llm_type(self) -> str:
+        return "always-tool-calls"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "_AlwaysToolCallsModel":
+        return self
+
+    def _generate(
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> ChatResult:
+        message = tool_response(f"c{len(messages)}", "echo", {"text": "y"})
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _build_graph_without_rounds_guard(agent: Agent) -> Any:
+    """以恒调用工具的假模型重建图：轮次 middleware 置为失效值，验证护栏兜底。"""
+    return create_agent(
+        model=_AlwaysToolCallsModel(),
+        tools=[_bridge_tool(agent.registry, tool_def) for tool_def in agent.registry.definitions()],
+        system_prompt=SYSTEM_PROMPT,
+        middleware=[
+            _ToolCallbacksMiddleware(agent.registry),
+            _MaxToolRoundsMiddleware(999),  # 故意失效：使轮次突破 agent.recursion_limit 对应范围
+            _ContextTrimMiddleware(agent.max_context_tokens),
+        ],
+    )
+
+
+class TestToolBridging:
+    def test_bridge_tools_expose_registry_schemas_verbatim(self) -> None:
+        """模型可见 schema 与注册表逐字段一致（保真，行为锁定点）。"""
+        agent, fake = make_agent([text_response("好")])
+        agent.run("x")  # 触发一次绑定
+
+        bound = fake.bound_tools[0]
+        assert bound  # 首次调用带工具
+        registry_schemas = agent.registry.schemas()
+        assert len(bound) == len(registry_schemas)
+        for tool, schema in zip(bound, registry_schemas):
+            assert convert_to_openai_tool(tool) == schema
+
+    def test_bridge_tool_delegates_to_dispatch(self) -> None:
+        """桥接工具执行统一委托注册表 dispatch（handler 结果直达模型）。"""
+        agent, fake = make_agent([text_response("好")])
+
+        agent.run("x")
+
+        echo_tool = fake.bound_tools[0][0]
+        result = echo_tool.invoke(
+            {"type": "tool_call", "args": {"text": "直呼"}, "id": "cx", "name": "echo"}
+        )
+        assert result.content == "ECHO:直呼"
