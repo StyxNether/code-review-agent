@@ -11,6 +11,7 @@ import sys
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.text import Text
 
 from cra import config
 from cra.agent import Agent
@@ -18,8 +19,18 @@ from cra.llm import LLMError
 from cra.tools import ERROR_PREFIX
 
 _TOOL_ARGS_PREVIEW_LIMIT = 80
-_GRADE_MARKERS = ("【严重】", "【一般】", "【建议】")
+# 分级标记的着色（M2 验收反馈：严重红 / 一般黄 / 建议绿）
+_SEVERITY_STYLES = {"严重": "bold red", "一般": "bold yellow", "建议": "bold green"}
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+# 标记识别（行内任意位置）：兼容模型自行输出的 ** 包裹，星号只被消耗不参与渲染
+_MARKER_RE = re.compile(r"\*{0,2}(【(?:严重|一般|建议)】|修改建议[：:])\*{0,2}")
+
+
+def _marker_style(marker: str) -> str:
+    """标记 → rich 样式：分级标记按级别着色加粗，修改建议加粗。"""
+    if marker.startswith("【"):
+        return _SEVERITY_STYLES[marker[1:-1]]
+    return "bold"
 
 
 def _fence_toggle(line: str, state: tuple[str, int] | None) -> tuple[str, int] | None:
@@ -41,23 +52,6 @@ def _in_fence(text: str) -> bool:
     for line in text.split("\n"):
         state = _fence_toggle(line, state)
     return state is not None
-
-
-def _emphasize_grade_markers(text: str) -> str:
-    """分级标记加粗（终端无法改变字号，用字重区分层级——M1 验收反馈）。
-
-    三个标记都替换（连续问题行同属一个 Markdown 段落，不能命中第一个就返回）；
-    围栏代码块内的行跳过——块内插入 ** 会以字面文本渲染出来。
-    """
-    lines: list[str] = []
-    state: tuple[str, int] | None = None
-    for line in text.split("\n"):
-        state = _fence_toggle(line, state)
-        if state is None:
-            for marker in _GRADE_MARKERS:
-                line = line.replace(marker, f"**{marker}**")
-        lines.append(line)
-    return "\n".join(lines)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -133,9 +127,49 @@ class _StreamingMarkdown:
             return
         if self._has_output or self._pending_break:
             self._console.print()  # 段落之间空一行（M1 验收反馈：避免文字堆叠）
-        self._console.print(Markdown(_emphasize_grade_markers(text)))
+        self._render_lines(text)
         self._has_output = True
         self._pending_break = False
+
+    def _render_lines(self, text: str) -> None:
+        """逐行分级渲染（M2 验收反馈：分级标记着色、修改建议加粗）。
+
+        含标记的行按标记切片：标记本体着色/加粗、文本片走单行 Markdown
+        （保留行内代码渲染），同行拼接；不含标记的行（含围栏内部）聚合为
+        Markdown 块，保持既有渲染不变。不往 Markdown 里插 **——CommonMark
+        的 flanking 规则下"中文**【标记】**中文"不会解析为加粗（修复轮实测）。
+        """
+        state: tuple[str, int] | None = None
+        chunk: list[str] = []
+        for line in text.split("\n"):
+            state = _fence_toggle(line, state)
+            if state is not None or not _MARKER_RE.search(line):
+                chunk.append(line)
+            else:
+                self._flush_chunk(chunk)
+                self._render_marked_line(line)
+        self._flush_chunk(chunk)
+
+    def _flush_chunk(self, chunk: list[str]) -> None:
+        if not any(line.strip() for line in chunk):
+            return
+        self._console.print(Markdown("\n".join(chunk)))
+
+    def _render_marked_line(self, line: str) -> None:
+        """单行按标记切片渲染：文本片 Markdown、标记片着色，同行拼接后换行。"""
+        position = 0
+        for match in _MARKER_RE.finditer(line):
+            before = line[position : match.start()]
+            if before:
+                self._console.print(Markdown(before), end="")
+            marker = match.group(1)
+            self._console.print(Text(marker, style=_marker_style(marker)), end="")
+            position = match.end()
+        tail = line[position:]
+        if tail.strip():
+            self._console.print(Markdown(tail))
+        elif position > 0:
+            self._console.print()
 
 
 def _run_turn(agent: Agent, console: Console, user_input: str) -> None:
@@ -186,7 +220,9 @@ def _run_chat() -> None:
     )
     while True:
         try:
-            user_input = input("你> ").strip()
+            # 提示符着色便于在流式输出中定位输入位置（M2 验收反馈）
+            console.print("你> ", style="bold cyan", end="")
+            user_input = input().strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见。")
             return
