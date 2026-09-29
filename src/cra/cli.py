@@ -15,6 +15,15 @@ from cra.agent import Agent
 from cra.llm import LLMError
 
 _TOOL_ARGS_PREVIEW_LIMIT = 80
+_GRADE_MARKERS = ("【严重】", "【一般】", "【建议】")
+
+
+def _emphasize_grade_markers(text: str) -> str:
+    """分级标记加粗：终端无法改变字号，用字重区分问题等级（M1 验收反馈）。"""
+    for marker in _GRADE_MARKERS:
+        if marker in text:
+            return text.replace(marker, f"**{marker}**")
+    return text
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -49,6 +58,12 @@ class _StreamingMarkdown:
     def __init__(self, console: Console) -> None:
         self._console = console
         self._buffer = ""
+        self._has_output = False
+        self._pending_break = False
+
+    def mark_break(self) -> None:
+        """在下一个段落前插入空行（工具打点与正文之间留出呼吸空间）。"""
+        self._pending_break = True
 
     def feed(self, delta: str) -> None:
         """接收一条文本增量，把其中已完成的段落渲染出去。"""
@@ -76,26 +91,34 @@ class _StreamingMarkdown:
         return -1
 
     def _print_segment(self, text: str) -> None:
-        if text.strip():
-            self._console.print(Markdown(text))
+        if not text.strip():
+            return
+        if self._has_output or self._pending_break:
+            self._console.print()  # 段落之间空一行（M1 验收反馈：避免文字堆叠）
+        self._console.print(Markdown(_emphasize_grade_markers(text)))
+        self._has_output = True
+        self._pending_break = False
 
 
 def _run_turn(agent: Agent, console: Console, user_input: str) -> None:
     """执行一轮对话：工具调用打点、最终回答流式渲染、中断与请求错误兜底。"""
     streamer = _StreamingMarkdown(console)
+
+    def on_tool(name: str, args: str) -> None:
+        console.print(f"⚙ {name}({_short(args)})", style="dim", markup=False, highlight=False)
+
+    def on_tool_result(result: str) -> None:
+        if result.startswith("错误"):
+            console.print("  ↳ 工具返回错误（已回传模型）", style="dim", markup=False)
+        else:
+            console.print(f"  ↳ 完成（{len(result)} 字符）", style="dim", markup=False)
+        streamer.mark_break()
+
     try:
         agent.run(
             user_input,
-            on_tool=lambda name, args: console.print(
-                f"⚙ {name}({_short(args)})", style="dim", markup=False, highlight=False
-            ),
-            on_tool_result=lambda result: console.print(
-                "  ↳ 工具返回错误（已回传模型）"
-                if result.startswith("错误")
-                else f"  ↳ 完成（{len(result)} 字符）",
-                style="dim",
-                markup=False,
-            ),
+            on_tool=on_tool,
+            on_tool_result=on_tool_result,
             on_delta=streamer.feed,
         )
     except KeyboardInterrupt:
