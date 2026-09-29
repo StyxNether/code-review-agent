@@ -1,6 +1,6 @@
 # code-review-agent · 代码审查助手
 
-> ✅ v0.1 交付版（《软件工程与项目实践》第 1 次作业）。开发过程与各里程碑验收记录见 [docs/PROGRESS.md](docs/PROGRESS.md)。
+> ✅ 交付版（《软件工程与项目实践》第 1 次作业）。架构、接口规格与设计决策详见 [docs/Design.md](docs/Design.md)。
 
 基于 LLM 的命令行代码审查工具。给它一段/一个/一组代码文件（任意文本型源码与配置文件，Python 为主），它以代码审查员身份输出分级问题清单，并能在多轮对话中自主调用工具（读文件、运行代码）核实问题。
 
@@ -96,7 +96,7 @@ uv run pytest        # 运行测试
 uv run ruff check .  # 代码规范检查
 ```
 
-项目结构与设计文档：[docs/Design.md](docs/Design.md)；里程碑过程与验收记录：[docs/PROGRESS.md](docs/PROGRESS.md)。
+项目结构与设计文档：[docs/Design.md](docs/Design.md)。
 
 ## 效果截图
 
@@ -110,4 +110,4 @@ uv run ruff check .  # 代码规范检查
 
 ---
 
-本项目由 AI 编码会话辅助开发；人机分工与开发过程披露见 [docs/Design.md](docs/Design.md) §7。
+本项目由 AI 编码会话辅助开发；人机分工与开发过程记录见 [docs/Design.md](docs/Design.md) §8。

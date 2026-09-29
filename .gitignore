@@ -12,3 +12,6 @@ dist/
 # 开发辅助文档（跨会话交接与 AI 会话协议），仅本地维护，不随仓库分发
 AGENTS.md
 docs/PROGRESS.md
+
+# 课程课件（是否入库待用户决定，先避免误提交）
+Homework 1.pptx
