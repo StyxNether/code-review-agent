@@ -86,6 +86,9 @@ def read_file(path: str, start: int | None = None, end: int | None = None) -> st
     text = raw.decode("utf-8", errors="replace")
     lines = text.splitlines()
     total = len(lines)
+    if total == 0:
+        # 空文件没有行区间可言，按区间规则会误报"start 不能大于 end"（M2 样例回归发现）
+        return f"{target}（空文件，共 0 行）"
 
     start_line, end_line = _normalize_range(start, end, total)
     error = _range_error(start, end, start_line, end_line, total)

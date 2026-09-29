@@ -130,6 +130,16 @@ class TestReadFile:
         assert result.startswith("错误")
         assert "二进制" in result
 
+    def test_empty_file_reports_empty_not_range_error(self, tmp_path: Path) -> None:
+        """回归（M2）：空文件按区间规则会误报 start>end，应提示空文件。"""
+        target = tmp_path / "empty.py"
+        target.touch()
+
+        result = fs.read_file(str(target))
+
+        assert "空文件" in result
+        assert not result.startswith("错误")
+
     def test_invalid_utf8_replaced_instead_of_crash(self, tmp_path: Path) -> None:
         target = tmp_path / "gbk.py"
         target.write_bytes("中文注释\n".encode("gbk"))  # 无 null 字节，不算二进制
