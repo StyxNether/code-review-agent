@@ -20,6 +20,10 @@ from cra.tools import ToolRegistry, get_default_registry
 
 MAX_TOOL_ROUNDS = 10  # §3.1：最大工具轮次，超过则强制要求模型给出结论
 
+# finish_reason="length" 时附加到最终回答（M1 挂账：长度截断的回答此前被静默当
+# 最终结论，用户无法察觉不完整）；同段文本一并入库，保证"继续"追问时模型可见
+_LENGTH_TRUNCATION_NOTICE = "\n\n⚠ 回答因达到输出长度上限被截断，可能不完整；可让我继续作答。"
+
 ToolEventCallback = Callable[[str, str], None]  # (工具名, 参数 JSON 原文)
 ToolResultCallback = Callable[[str], None]  # 工具结果文本
 DeltaCallback = Callable[[str], None]  # 最终回答的文本增量
@@ -161,7 +165,7 @@ class Agent:
             self._absorb_usage(response.total_tokens)
             message = response.message
             if not message.tool_calls:
-                return self._finalize(message.content)
+                return self._finalize(message.content, response.finish_reason, on_delta)
             if tool_rounds >= MAX_TOOL_ROUNDS:
                 return self._force_conclusion(on_delta)
             self.messages.append(_assistant_message_dict(message))
@@ -176,11 +180,21 @@ class Agent:
                 )
             tool_rounds += 1
 
-    def _finalize(self, content: str | None) -> str:
-        """记录最终回答并返回；空回答不静默（§3.4），以可读错误上抛并作废本轮。"""
+    def _finalize(
+        self, content: str | None, finish_reason: str | None, on_delta: DeltaCallback | None
+    ) -> str:
+        """记录最终回答并返回；空回答不静默（§3.4），以可读错误上抛并作废本轮。
+
+        finish_reason="length" 说明回答被输出长度上限截断：附加可见提示并经
+        on_delta 渲染（cli 不读返回值、只渲染增量），不静默当完整结论。
+        """
         text = content or ""
         if not text.strip():
             raise llm.LLMError("模型返回了空回答，请重试或换个问法。")
+        if finish_reason == "length":
+            text += _LENGTH_TRUNCATION_NOTICE
+            if on_delta is not None:
+                on_delta(_LENGTH_TRUNCATION_NOTICE)
         self.messages.append({"role": "assistant", "content": text})
         return text
 
@@ -200,7 +214,7 @@ class Agent:
             self.client, self.model, self.messages, tools=None, stream=True, on_delta=on_delta
         )
         self._absorb_usage(response.total_tokens)
-        return self._finalize(response.message.content)
+        return self._finalize(response.message.content, response.finish_reason, on_delta)
 
     def _absorb_usage(self, total_tokens: int | None) -> None:
         """记录真实 usage 并按需触发轮次截断（每轮响应后检查，含工具轮）。"""

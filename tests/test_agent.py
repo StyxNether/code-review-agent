@@ -38,9 +38,13 @@ def tool_response(
     return llm.LLMResponse(message=message, total_tokens=total)
 
 
-def text_response(text: str, total: int | None = None) -> llm.LLMResponse:
+def text_response(
+    text: str, total: int | None = None, finish_reason: str | None = "stop"
+) -> llm.LLMResponse:
     message = llm.AssistantMessage(content=text, tool_calls=[])
-    return llm.LLMResponse(message=message, total_tokens=total)
+    return llm.LLMResponse(
+        message=message, total_tokens=total, finish_reason=finish_reason
+    )
 
 
 def make_agent(
@@ -173,10 +177,34 @@ class TestRunBasics:
     ) -> None:
         deltas: list[str] = []
         agent, _ = make_agent(monkeypatch, [text_response("流式回答")])
-
         agent.run("x", on_delta=deltas.append)
 
         assert deltas == ["流式回答"]
+
+    def test_length_truncated_answer_gets_visible_notice(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M1 挂账：finish_reason=length 的回答不能被静默当完整结论。
+
+        提示须同时到达三处：渲染增量（cli 只认 on_delta）、返回值、messages
+        （保证"继续"追问时模型可见截断状态）。
+        """
+        deltas: list[str] = []
+        agent, _ = make_agent(monkeypatch, [text_response("被截断的回答", finish_reason="length")])
+
+        result = agent.run("x", on_delta=deltas.append)
+
+        assert result.startswith("被截断的回答")
+        assert "截断" in result
+        assert deltas[-1].strip().startswith("⚠")  # 提示经增量渲染
+        assert agent.messages[-1]["content"] == result  # 入库文本含提示
+
+    def test_normal_stop_reason_adds_no_notice(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent, _ = make_agent(monkeypatch, [text_response("正常回答")])
+
+        result = agent.run("x")
+
+        assert result == "正常回答"
 
     def test_final_call_after_tools_carries_full_history(
         self, monkeypatch: pytest.MonkeyPatch
@@ -222,6 +250,37 @@ class TestTruncateRounds:
     def test_none_usage_untouched(self) -> None:
         messages = [{"role": "system", "content": "S"}, *make_round("u1", with_tools=False)]
         assert truncate_rounds(messages, usage_total_tokens=None, max_tokens=10) == messages
+
+    def test_exactly_at_threshold_untouched(self) -> None:
+        """边界：usage == 阈值不触发截断（仅"超过"才丢轮次）。"""
+        messages = [{"role": "system", "content": "S"}, *make_round("u1", with_tools=False)]
+
+        result = truncate_rounds(messages, usage_total_tokens=200, max_tokens=200)
+
+        assert result == messages
+
+    def test_one_token_over_threshold_drops_oldest(self) -> None:
+        messages: list[dict[str, Any]] = [{"role": "system", "content": "S"}]
+        messages += make_round("u1", with_tools=False)
+        messages += make_round("u2", with_tools=False)
+
+        result = truncate_rounds(messages, usage_total_tokens=201, max_tokens=200)
+
+        assert result[1]["content"] == "u2"  # 超过 1 token 也按轮次整体丢最旧一轮
+
+    def test_estimate_boundary_stops_dropping(self) -> None:
+        """边界：估算降到阈值以内即停（两轮各恰 1000 字符 ≈ 500 tokens，阈值 500）。
+
+        丢一轮后估算 == 阈值，不再继续丢；估算只决定额外丢弃量（触发以真实 usage 为准）。
+        """
+        messages: list[dict[str, Any]] = [{"role": "system", "content": "S"}]
+        messages += make_round("u" * 996, with_tools=False)
+        messages += make_round("v" * 996, with_tools=False)
+
+        result = truncate_rounds(messages, usage_total_tokens=100_000, max_tokens=500)
+
+        assert [m["role"] for m in result].count("user") == 1
+        assert result[-1]["content"] == "done"
 
     def test_over_threshold_drops_oldest_round_atomically(self) -> None:
         messages: list[dict[str, Any]] = [{"role": "system", "content": "S"}]
