@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+dist/
+.env
+*.pyc
+
+# 本地安全扫描工具（mimosa 插件）状态目录，非项目内容
+.mimosa/
