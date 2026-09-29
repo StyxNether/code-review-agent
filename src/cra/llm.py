@@ -7,6 +7,7 @@ tool_calls 分片组装与 usage 读取都在此层完成，agent 不接触 SDK 
 流式响应中途断开不重试——增量已回调渲染，重发会让用户看到重复文本。
 """
 
+import sys
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -30,11 +31,21 @@ RETRY_DELAYS_SECONDS = (1, 2, 4)  # §5：指数退避间隔；即最多重试 3
 
 _RETRYABLE_ERRORS = (APITimeoutError, APIConnectionError, RateLimitError)
 
-_AUTH_GUIDANCE = (
-    "认证失败（HTTP 401/403）：API key 无效、未激活或无权访问该模型，已停止重试。"
-    "请检查环境变量 SE_CodeAgent 是否为有效的 DeepSeek API key；"
-    '修改方法（Windows）：setx SE_CodeAgent "sk-你的key" 后重开终端生效。'
-)
+
+def _key_hint() -> str:
+    """key 设置命令按当前平台给出（M3 挂账：指引跨平台化）。"""
+    if sys.platform == "win32":
+        return 'Windows：setx SE_CodeAgent "sk-你的key"，然后新开终端生效'
+    return 'macOS/Linux：export SE_CodeAgent="sk-你的key"（写入 ~/.bashrc 或 ~/.zshrc 持久化）'
+
+
+def _auth_guidance() -> str:
+    """认证失败的排查指引（§5：401/403 快速失败时随错误给出）。"""
+    return (
+        "认证失败（HTTP 401/403）：API key 无效、未激活或无权访问该模型，已停止重试。"
+        "请检查环境变量 SE_CodeAgent 是否为有效的 DeepSeek API key；"
+        f"修改方法（{_key_hint()}）。"
+    )
 _RETRY_EXHAUSTED_GUIDANCE = (
     "请求多次失败（已按 1s/2s/4s 重试 3 次）。请检查网络连接是否可用、"
     "CRA_BASE_URL 指向的服务是否可达，稍后重试。"
@@ -66,10 +77,15 @@ class AssistantMessage:
 
 @dataclass(frozen=True)
 class LLMResponse:
-    """补全结果 + 上下文截断所需的 usage（服务端未返回时为 None）。"""
+    """补全结果 + 上下文截断所需的 usage（服务端未返回时为 None）。
+
+    finish_reason 透传服务端取值（M1 挂账：长度截断的回答此前被静默当最终
+    结论）；"length" 时由 agent 在最终回答后明示截断提示。服务端未给出时为 None。
+    """
 
     message: AssistantMessage
     total_tokens: int | None
+    finish_reason: str | None = None
 
 
 def create_client() -> OpenAI:
@@ -102,7 +118,7 @@ def _call_with_retries(send: Callable[[], Any]) -> Any:
             return send()
         except OpenAIError as exc:
             if isinstance(exc, APIStatusError) and exc.status_code in (401, 403):
-                raise LLMError(f"{_AUTH_GUIDANCE}（{exc}）") from exc
+                raise LLMError(f"{_auth_guidance()}（{exc}）") from exc
             if not isinstance(exc, _RETRYABLE_ERRORS):
                 raise
             last_error = exc
@@ -167,6 +183,7 @@ def _complete_once(
     return LLMResponse(
         message=AssistantMessage(content=message.content, tool_calls=tool_calls),
         total_tokens=usage.total_tokens if usage else None,
+        finish_reason=response.choices[0].finish_reason,
     )
 
 
@@ -191,12 +208,15 @@ def _complete_streaming(
     content_parts: list[str] = []
     fragments: dict[int, dict[str, Any]] = {}
     total_tokens: int | None = None
+    finish_reason: str | None = None
     try:
         for chunk in stream:
             if chunk.usage is not None:
                 total_tokens = chunk.usage.total_tokens
             if not chunk.choices:
                 continue  # 末块只携带 usage
+            if chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason  # 末个非空取值生效
             delta = chunk.choices[0].delta
             if delta is None:
                 continue
@@ -227,4 +247,5 @@ def _complete_streaming(
     return LLMResponse(
         message=AssistantMessage(content="".join(content_parts) or None, tool_calls=tool_calls),
         total_tokens=total_tokens,
+        finish_reason=finish_reason,
     )

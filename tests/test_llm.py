@@ -19,9 +19,13 @@ from openai import (
 from cra import llm
 
 
-def _content_chunk(text: str) -> SimpleNamespace:
+def _content_chunk(text: str, finish_reason: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
-        choices=[SimpleNamespace(delta=SimpleNamespace(content=text, tool_calls=None))],
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(content=text, tool_calls=None), finish_reason=finish_reason
+            )
+        ],
         usage=None,
     )
 
@@ -38,9 +42,13 @@ def _tool_piece(
     )
 
 
-def _tool_chunk(pieces: list[SimpleNamespace]) -> SimpleNamespace:
+def _tool_chunk(
+    pieces: list[SimpleNamespace], finish_reason: str | None = None
+) -> SimpleNamespace:
     return SimpleNamespace(
-        choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=pieces))],
+        choices=[
+            SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=pieces), finish_reason=finish_reason)
+        ],
         usage=None,
     )
 
@@ -74,9 +82,14 @@ def _connection_error() -> APIConnectionError:
     return APIConnectionError(message="connection reset", request=SimpleNamespace())
 
 
-def _ok_response(content: str = "好") -> SimpleNamespace:
+def _ok_response(content: str = "好", finish_reason: str | None = "stop") -> SimpleNamespace:
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=None))],
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content, tool_calls=None),
+                finish_reason=finish_reason,
+            )
+        ],
         usage=SimpleNamespace(total_tokens=5),
     )
 
@@ -162,7 +175,7 @@ class TestNonStreaming:
             ],
         )
         sdk_response = SimpleNamespace(
-            choices=[SimpleNamespace(message=sdk_message)],
+            choices=[SimpleNamespace(message=sdk_message, finish_reason="tool_calls")],
             usage=SimpleNamespace(total_tokens=99),
         )
 
@@ -202,7 +215,11 @@ class TestNonStreaming:
         """tools 为 None 时省略字段，不依赖 None 的序列化语义。"""
         captured: dict[str, object] = {}
         sdk_response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="好", tool_calls=None))],
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="好", tool_calls=None), finish_reason="stop"
+                )
+            ],
             usage=SimpleNamespace(total_tokens=5),
         )
 
@@ -216,7 +233,11 @@ class TestNonStreaming:
     def test_tools_passed_when_provided(self) -> None:
         captured: dict[str, object] = {}
         sdk_response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="好", tool_calls=None))],
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="好", tool_calls=None), finish_reason="stop"
+                )
+            ],
             usage=SimpleNamespace(total_tokens=5),
         )
         tools = [{"type": "function", "function": {"name": "list_dir"}}]
@@ -401,3 +422,92 @@ class TestCreateClient:
         """SDK 隐式重试显式关闭，重试策略由 M2 在应用层实现。"""
         monkeypatch.setenv("SE_CodeAgent", "sk-test-key")
         assert llm.create_client().max_retries == 0
+
+
+class TestFinishReason:
+    """M1 挂账：finish_reason 透传（长度截断的回答不再被静默当最终结论）。"""
+
+    def test_streaming_length_reason_passed_through(self) -> None:
+        chunks = [
+            _content_chunk("回答的前半"),
+            _content_chunk("", finish_reason="length"),
+            _usage_chunk(88),
+        ]
+
+        response = llm.complete(
+            _fake_client(lambda **_: _fake_stream(chunks)()), "test-model", [], stream=True
+        )
+
+        assert response.finish_reason == "length"
+
+    def test_streaming_tool_calls_reason_passed_through(self) -> None:
+        chunks = [
+            _tool_chunk([_tool_piece(0, call_id="c1", name="list_dir", arguments="{}")],
+                        finish_reason="tool_calls"),
+            _usage_chunk(9),
+        ]
+
+        response = llm.complete(
+            _fake_client(lambda **_: _fake_stream(chunks)()), "test-model", [], stream=True
+        )
+
+        assert response.finish_reason == "tool_calls"
+
+    def test_streaming_missing_reason_degrades_to_none(self) -> None:
+        chunks = [_content_chunk("正文", finish_reason=None), _usage_chunk(3)]
+
+        response = llm.complete(
+            _fake_client(lambda **_: _fake_stream(chunks)()), "test-model", [], stream=True
+        )
+
+        assert response.finish_reason is None
+
+    def test_non_streaming_reason_passed_through(self) -> None:
+        response = llm.complete(
+            _fake_client(lambda **_: _ok_response(finish_reason="length")), "test-model", []
+        )
+
+        assert response.finish_reason == "length"
+
+
+class TestAuthGuidance:
+    """M3 挂账：key 指引跨平台化——按当前平台给出对应设置命令。"""
+
+    def test_windows_hint_mentions_setx(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(llm.sys, "platform", "win32")
+        assert "setx" in llm._key_hint()
+
+    def test_posix_hint_mentions_export(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(llm.sys, "platform", "linux")
+        assert "export" in llm._key_hint()
+
+    def test_auth_error_message_uses_platform_hint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(llm.sys, "platform", "linux")
+        monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+
+        def create(**_: object) -> SimpleNamespace:
+            raise _http_error(AuthenticationError, 401)
+
+        with pytest.raises(llm.LLMError, match="export"):
+            llm.complete(_fake_client(create), "test-model", [])
+
+
+class TestStreamingBadRequest:
+    """挂账处置记录：stream_options 在不支持的服务端可能 400——设计决定不做自动
+    降级重试（DeepSeek 已实测支持；400 属参数类错误，按 §5 不在重试范围）。"""
+
+    def test_streaming_400_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+        calls = 0
+
+        def create(**_: object) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            raise _http_error(APIStatusError, 400)
+
+        with pytest.raises(llm.LLMError, match="http error"):
+            llm.complete(_fake_client(create), "test-model", [], stream=True)
+
+        assert calls == 1
