@@ -2,20 +2,43 @@
 
 llm 只管 API 与重试（§3.4）：把 SDK 的流式/非流式响应归一为本模块的数据类型，
 tool_calls 分片组装与 usage 读取都在此层完成，agent 不接触 SDK 类型。
-指数退避重试按 Design.md §5 在 M2 加入。
+重试（§5）：超时/限流/连接错误按 1/2/4s 指数退避，最多重试 3 次；认证错误
+（401/403）快速失败并给出 key 排查指引。重试只覆盖建连阶段（请求发出前的失败）；
+流式响应中途断开不重试——增量已回调渲染，重发会让用户看到重复文本。
 """
 
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from openai import OpenAI, OpenAIError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    OpenAI,
+    OpenAIError,
+    RateLimitError,
+)
 
 from cra import config
 
 REQUEST_TIMEOUT_SECONDS = 60  # 请求级超时（§5）：不用 SDK 默认 600s，避免失败请求长时间挂起
 TEMPERATURE = 0.2  # §6：输出稳定，黄金用例可复现
+RETRY_DELAYS_SECONDS = (1, 2, 4)  # §5：指数退避间隔；即最多重试 3 次（首次 + 3 次尝试）
+
+_RETRYABLE_ERRORS = (APITimeoutError, APIConnectionError, RateLimitError)
+
+_AUTH_GUIDANCE = (
+    "认证失败（HTTP 401/403）：API key 无效、未激活或无权访问该模型，已停止重试。"
+    "请检查环境变量 SE_CodeAgent 是否为有效的 DeepSeek API key；"
+    '修改方法（Windows）：setx SE_CodeAgent "sk-你的key" 后重开终端生效。'
+)
+_RETRY_EXHAUSTED_GUIDANCE = (
+    "请求多次失败（已按 1s/2s/4s 重试 3 次）。请检查网络连接是否可用、"
+    "CRA_BASE_URL 指向的服务是否可达，稍后重试。"
+)
 
 DeltaCallback = Callable[[str], None]
 
@@ -66,6 +89,28 @@ def create_client() -> OpenAI:
     )
 
 
+def _call_with_retries(send: Callable[[], Any]) -> Any:
+    """执行一次 API 请求，仅对超时/限流/连接错误按指数退避重试（§5）。
+
+    认证错误（401/403）快速失败并给出 key 排查指引，绝不重试（重试只会
+    重复失败还拖慢报错）；其余 OpenAIError（如 4xx 参数错误、5xx）不属于
+    设计约定的重试范围，原样上抛由 complete 包装为 LLMError。
+    """
+    last_error: OpenAIError | None = None
+    for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
+        try:
+            return send()
+        except OpenAIError as exc:
+            if isinstance(exc, APIStatusError) and exc.status_code in (401, 403):
+                raise LLMError(f"{_AUTH_GUIDANCE}（{exc}）") from exc
+            if not isinstance(exc, _RETRYABLE_ERRORS):
+                raise
+            last_error = exc
+            if attempt < len(RETRY_DELAYS_SECONDS):
+                time.sleep(RETRY_DELAYS_SECONDS[attempt])
+    raise LLMError(f"{_RETRY_EXHAUSTED_GUIDANCE}（最后错误：{last_error}）") from last_error
+
+
 def complete(
     client: OpenAI,
     model: str,
@@ -106,8 +151,10 @@ def _complete_once(
     tools: list[dict[str, Any]] | None,
 ) -> LLMResponse:
     """非流式补全：tool_calls 与 usage 直接可取。"""
-    response = client.chat.completions.create(
-        **_request_kwargs(model, messages, tools, stream=False)
+    response = _call_with_retries(
+        lambda: client.chat.completions.create(
+            **_request_kwargs(model, messages, tools, stream=False)
+        )
     )
     if not response.choices:
         raise LLMError("服务商返回了空 choices，无法取得回答。")
@@ -133,10 +180,13 @@ def _complete_streaming(
     """流式补全：文本增量经 on_delta 回调；tool_calls 分片按 index 组装为完整调用。
 
     usage 通过 stream_options 在末块取得（§3.1），服务端不支持时为 None（安全降级：
-    只是不触发截断，不影响正确性）。
+    只是不触发截断，不影响正确性）。仅建连（create 调用）参与重试；迭代中途的
+    连接中断不重试（增量已渲染，重发会重复输出），经 complete 包装为 LLMError 上抛。
     """
-    stream = client.chat.completions.create(
-        **_request_kwargs(model, messages, tools, stream=True)
+    stream = _call_with_retries(
+        lambda: client.chat.completions.create(
+            **_request_kwargs(model, messages, tools, stream=True)
+        )
     )
     content_parts: list[str] = []
     fragments: dict[int, dict[str, Any]] = {}

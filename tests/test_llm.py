@@ -1,11 +1,20 @@
-"""llm 补全归一化：流式 tool_calls 分片组装、usage 透出、SDK 异常包装（fake 客户端，无网络）。"""
+"""llm 补全归一化与重试：流式 tool_calls 分片组装、usage 透出、SDK 异常包装、
+指数退避重试与认证快速失败（fake 客户端，无网络）。"""
 
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from openai import APIError, OpenAIError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    OpenAIError,
+    RateLimitError,
+)
 
 from cra import llm
 
@@ -47,6 +56,29 @@ def _fake_client(create) -> SimpleNamespace:
 def _fake_stream(chunks: list[SimpleNamespace]) -> Callable[[], Any]:
     """返回一个生成器工厂：生成器自带 close()，贴近真实 openai Stream 的形状。"""
     return lambda: (chunk for chunk in chunks)
+
+
+def _http_error(
+    cls: type[APIStatusError], status_code: int
+) -> APIStatusError:
+    """构造带 status_code 的 APIStatusError 系异常（response 需有 request/headers）。"""
+    response = SimpleNamespace(status_code=status_code, request=SimpleNamespace(), headers={})
+    return cls("http error", response=response, body=None)
+
+
+def _timeout_error() -> APITimeoutError:
+    return APITimeoutError(SimpleNamespace())
+
+
+def _connection_error() -> APIConnectionError:
+    return APIConnectionError(message="connection reset", request=SimpleNamespace())
+
+
+def _ok_response(content: str = "好") -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=None))],
+        usage=SimpleNamespace(total_tokens=5),
+    )
 
 
 class TestStreaming:
@@ -229,6 +261,133 @@ class TestNonStreaming:
         )
 
         assert [call.name for call in response.message.tool_calls] == ["list_dir"]
+
+
+class TestRetry:
+    """§5：超时/限流/连接错误按 1/2/4s 退避最多重试 3 次；认证错误快速失败。"""
+
+    def test_rate_limit_retried_then_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[int] = []
+        monkeypatch.setattr(llm.time, "sleep", lambda s: sleeps.append(s))
+        calls = 0
+
+        def create(**_: object) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise _http_error(RateLimitError, 429)
+            return _ok_response()
+
+        response = llm.complete(_fake_client(create), "test-model", [])
+
+        assert response.message.content == "好"
+        assert calls == 2
+        assert sleeps == [1]
+
+    def test_timeout_exhaustion_gives_friendly_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sleeps: list[int] = []
+        monkeypatch.setattr(llm.time, "sleep", lambda s: sleeps.append(s))
+        calls = 0
+
+        def create(**_: object) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            raise _timeout_error()
+
+        with pytest.raises(llm.LLMError, match="重试 3 次") as excinfo:
+            llm.complete(_fake_client(create), "test-model", [])
+
+        assert calls == 4  # 首次 + 3 次重试
+        assert sleeps == [1, 2, 4]
+        assert "最后错误" in str(excinfo.value)
+
+    def test_connection_error_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[int] = []
+        monkeypatch.setattr(llm.time, "sleep", lambda s: sleeps.append(s))
+        calls = 0
+
+        def create(**_: object) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise _connection_error()
+            return _ok_response()
+
+        llm.complete(_fake_client(create), "test-model", [])
+
+        assert calls == 2
+        assert sleeps == [1]
+
+    def test_auth_401_fails_fast_with_key_guidance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sleeps: list[int] = []
+        monkeypatch.setattr(llm.time, "sleep", lambda s: sleeps.append(s))
+        calls = 0
+
+        def create(**_: object) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            raise _http_error(AuthenticationError, 401)
+
+        with pytest.raises(llm.LLMError, match="SE_CodeAgent") as excinfo:
+            llm.complete(_fake_client(create), "test-model", [])
+
+        assert calls == 1  # 认证错误绝不重试
+        assert sleeps == []
+        assert "401" in str(excinfo.value)
+
+    def test_auth_403_fails_fast(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+        calls = 0
+
+        def create(**_: object) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            raise _http_error(APIStatusError, 403)
+
+        with pytest.raises(llm.LLMError, match="认证失败"):
+            llm.complete(_fake_client(create), "test-model", [])
+
+        assert calls == 1
+
+    def test_other_status_errors_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """§5 重试范围仅限超时/限流/连接；5xx 等不重试，包装后原样上抛。"""
+        sleeps: list[int] = []
+        monkeypatch.setattr(llm.time, "sleep", lambda s: sleeps.append(s))
+        calls = 0
+
+        def create(**_: object) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            raise _http_error(APIStatusError, 500)
+
+        with pytest.raises(llm.LLMError, match="http error"):
+            llm.complete(_fake_client(create), "test-model", [])
+
+        assert calls == 1
+        assert sleeps == []
+
+    def test_streaming_creation_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """流式仅建连（create）参与重试；迭代中途断开不重试。"""
+        monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+        calls = 0
+        chunks = [_content_chunk("正文"), _usage_chunk(5)]
+
+        def create(**kwargs: object) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise _http_error(RateLimitError, 429)
+            assert kwargs["stream"] is True
+            return _fake_stream(chunks)()
+
+        response = llm.complete(_fake_client(create), "test-model", [], stream=True)
+
+        assert response.message.content == "正文"
+        assert calls == 2
 
 
 class TestCreateClient:
