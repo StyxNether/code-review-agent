@@ -60,14 +60,32 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="cra", description="基于 LLM 的命令行代码审查助手"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("chat", help="进入对话式代码审查 REPL")
+    # §8.2 核对项：限制声明在 CLI 层面可见（工具 description 之外的第二道明示）
+    subparsers.add_parser(
+        "chat",
+        help="进入对话式代码审查 REPL（run_python 非沙箱、限时执行）",
+        description=(
+            "进入对话式代码审查 REPL。注意：Agent 的 run_python 工具在本机直接执行"
+            "代码，非沙箱、限时执行（默认 10 秒，超时强杀进程树），详见 README「限制」。"
+        ),
+    )
     return parser
 
 
-def _print_setup_guide() -> None:
+def _setup_hint() -> str:
+    """key 设置命令按当前平台给出（M3 挂账：指引跨平台化）。"""
+    if sys.platform == "win32":
+        return '设置方法（Windows）：setx SE_CodeAgent "sk-你的key"，然后新开终端重试。'
+    return (
+        '设置方法（macOS/Linux）：export SE_CodeAgent="sk-你的key"'
+        "（写入 ~/.bashrc 或 ~/.zshrc 可持久化）。"
+    )
+
+
+def _print_setup_guide(console: Console) -> None:
     """SE_CodeAgent 缺失时的设置指引（§5：打印指引后退出）。"""
-    print("未设置环境变量 SE_CodeAgent（DeepSeek API key）。")
-    print('设置方法（Windows）：setx SE_CodeAgent "sk-你的key"，然后新开终端重试。')
+    console.print("未设置环境变量 SE_CodeAgent（DeepSeek API key）。", markup=False)
+    console.print(_setup_hint(), markup=False)
 
 
 def _short(text: str, limit: int = _TOOL_ARGS_PREVIEW_LIMIT) -> str:
@@ -208,11 +226,11 @@ def _run_turn(agent: Agent, console: Console, user_input: str) -> None:
 
 def _run_chat() -> None:
     """REPL 主循环：exit 退出；/clear 重置为仅含系统提示词的初始状态（§6）。"""
+    console = Console()
     if not config.get_api_key():
-        _print_setup_guide()
+        _print_setup_guide(console)
         sys.exit(1)
 
-    console = Console()
     agent = Agent()
     console.print(
         f"[bold]code-review-agent[/] 已就绪（模型：{agent.model}）。"
@@ -224,7 +242,7 @@ def _run_chat() -> None:
             console.print("你> ", style="bold cyan", end="")
             user_input = input().strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n再见。")
+            console.print("\n再见。", markup=False, highlight=False)
             return
         if not user_input:
             continue  # 空输入/纯空白直接进入下一轮提示，不调 API（§6）

@@ -1,9 +1,21 @@
-"""cli 单元：参数解析、分级标记着色渲染与围栏状态机（不产生终端输出，无网络）。"""
+"""cli 单元：参数解析、分级标记着色渲染与围栏状态机、REPL 循环与设置指引
+（不产生真实终端输出，无网络）。"""
+
+import sys
+from typing import Any
 
 import pytest
 from rich.console import Console
 
-from cra.cli import _build_parser, _in_fence, _marker_style, _StreamingMarkdown
+from cra import cli
+from cra.cli import (
+    _build_parser,
+    _in_fence,
+    _marker_style,
+    _print_setup_guide,
+    _setup_hint,
+    _StreamingMarkdown,
+)
 
 
 class TestParser:
@@ -23,6 +35,122 @@ class TestParser:
     def test_unknown_subcommand_exits(self) -> None:
         with pytest.raises(SystemExit):
             _build_parser().parse_args(["nope"])
+
+    def test_chat_help_declares_non_sandbox_and_timeout(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """§8.2 核对项：非沙箱、限时执行的限制声明在 CLI 层面可见。"""
+        with pytest.raises(SystemExit) as excinfo:
+            _build_parser().parse_args(["chat", "--help"])
+
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "非沙箱" in out
+        assert "限时" in out
+
+
+class TestSetupGuide:
+    """M3 挂账：key 指引跨平台化；输出统一经 rich Console（不再混用 print）。"""
+
+    def test_windows_hint_mentions_setx(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert "setx" in _setup_hint()
+
+    def test_posix_hint_mentions_export(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert "export" in _setup_hint()
+
+    def test_guide_printed_via_console(self, capsys: pytest.CaptureFixture[str]) -> None:
+        _print_setup_guide(Console())
+
+        out = capsys.readouterr().out
+        assert "SE_CodeAgent" in out
+
+
+class _FakeAgent:
+    """替换真实 Agent：避免构造 OpenAI 客户端；记录 /clear 与对话轮次。"""
+
+    last: "_FakeAgent | None" = None
+
+    def __init__(self, **_kwargs: Any) -> None:
+        self.model = "test-model"
+        self.reset_calls = 0
+        self.turns: list[str] = []
+        _FakeAgent.last = self
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+    def run(self, user_input: str, **_kwargs: Any) -> str:
+        self.turns.append(user_input)
+        return "答"
+
+
+class TestRunChat:
+    """M3 挂账：_run_chat 的 sys.exit 路径与 REPL 内置命令可测（mock input/Agent）。"""
+
+    def test_missing_key_exits_with_guide(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("SE_CodeAgent", raising=False)
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._run_chat()
+
+        assert excinfo.value.code == 1
+        assert "SE_CodeAgent" in capsys.readouterr().out
+
+    def test_exit_command_ends_repl(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        monkeypatch.setattr("builtins.input", lambda: "exit")
+
+        cli._run_chat()
+
+        assert "再见" in capsys.readouterr().out
+
+    def test_eof_ends_repl_gracefully(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+
+        def raise_eof() -> str:
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", raise_eof)
+
+        cli._run_chat()  # 不抛异常即通过
+
+        assert "再见" in capsys.readouterr().out
+
+    def test_clear_resets_agent_and_continues(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        inputs = iter(["/clear", "exit"])
+        monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+        cli._run_chat()
+
+        assert _FakeAgent.last is not None
+        assert _FakeAgent.last.reset_calls == 1
+
+    def test_empty_input_continues_without_api_call(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        inputs = iter(["", "   ", "exit"])
+        monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+        cli._run_chat()
+
+        # 空输入/纯空白只重新提示，不发起对话轮次（§6）
+        assert _FakeAgent.last is not None
+        assert _FakeAgent.last.turns == []
+        assert capsys.readouterr().out.count("你>") == 3
 
 
 def test_all_markers_bolded_in_one_segment() -> None:
