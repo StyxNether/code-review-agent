@@ -6,8 +6,9 @@ messages 的结构与截断规则只存在于本模块。
 
 关于 §3.1 "工具轮次非流式"：轮次类型（工具轮/最终回答）只能在响应返回后判定，
 无法预判，故统一采用流式请求——tool_calls 由分片组装，完整性与非流式等价，
-usage 经 stream_options 取得；工具轮不渲染增量、仅最终回答渲染，用户可见行为
-与设计一致。与 §3.1 字面的差异已在 PROGRESS.md 验收记录中声明，待验收裁定。
+usage 经 stream_options 取得；工具轮通常没有文本增量，伴随的少量文本（罕见）
+也会渲染，属在不放弃最终回答流式、不做双倍生成前提下的已知取舍。与 §3.1
+字面的差异已在 PROGRESS.md 验收记录中声明，待验收裁定。
 """
 
 from collections.abc import Callable
@@ -30,10 +31,10 @@ def _user_message_indices(messages: list[dict[str, Any]]) -> list[int]:
 
 
 def _drop_oldest_round(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """丢弃最旧的一个完整轮次；只剩一轮（或零轮）时原样返回，绝不拆散最后一轮。"""
+    """丢弃最旧的一个完整轮次；只剩一轮（或零轮）时返回副本，绝不拆散最后一轮。"""
     boundaries = _user_message_indices(messages)
     if len(boundaries) < 2:
-        return messages
+        return list(messages)
     return [messages[0], *messages[boundaries[1] :]]
 
 
@@ -61,7 +62,7 @@ def truncate_rounds(
     完整轮次——单轮自身超限时宁可超限也不产生非法消息结构。返回新列表（纯函数）。
     """
     if usage_total_tokens is None or usage_total_tokens <= max_tokens:
-        return messages
+        return list(messages)
     kept = _drop_oldest_round(messages)
     while _estimate_tokens(kept) > max_tokens and len(_user_message_indices(kept)) >= 2:
         kept = _drop_oldest_round(kept)
@@ -120,15 +121,24 @@ class Agent:
         """处理一轮用户输入：自主调用工具直至给出最终回答，返回最终文本。
 
         on_tool / on_tool_result / on_delta 为渲染回调（cli 注入，agent 不依赖 rich）。
-        模型在工具轮若伴随少量文本增量，也会经 on_delta 回调（罕见且无害）。
+        轮次类型无法预判，所有请求都带 on_delta：工具轮的伴随文本增量（罕见）也会
+        渲染；达到轮次上限被丢弃的那次响应若带文本同样会先渲染一次（已知取舍）。
+        任何异常（Ctrl+C 或请求失败，含空回答）都会把 messages 回滚到本轮开始前的
+        合法前缀、本轮作废（§5），然后原样上抛。
         """
-        snapshot = len(self.messages)
         self.messages.append({"role": "user", "content": user_input})
+        start_message = self.messages[-1]
         try:
             return self._loop(on_tool, on_tool_result, on_delta)
-        except KeyboardInterrupt:
-            # §5：中断把 messages 回滚到本轮开始前的合法前缀，该轮作废（防半截消息 400）
-            del self.messages[snapshot:]
+        except BaseException:
+            # §5：任何异常（中断/请求失败）都要先回滚本轮再上抛。
+            # 回滚不能用位置索引：截断会把 self.messages 替换为更短的新列表，
+            # 旧索引随之失配（验收走查发现的缺陷）。按本轮起始 user 消息的对象身份
+            # 定位——截断按轮次切片保留引用，且永不丢弃最后一轮，故必能找到。
+            for index, message in enumerate(self.messages):
+                if message is start_message:
+                    del self.messages[index:]
+                    break
             raise
 
     def _loop(
@@ -137,21 +147,21 @@ class Agent:
         on_tool_result: ToolResultCallback | None,
         on_delta: DeltaCallback | None,
     ) -> str:
+        schemas = self.registry.schemas()  # 工具集会话内不变，循环外取一次
         tool_rounds = 0
         while True:
             response = llm.complete(
                 self.client,
                 self.model,
                 self.messages,
-                tools=self.registry.schemas(),
+                tools=schemas,
                 stream=True,
                 on_delta=on_delta,
             )
             self._absorb_usage(response.total_tokens)
             message = response.message
             if not message.tool_calls:
-                self.messages.append({"role": "assistant", "content": message.content or ""})
-                return message.content or ""
+                return self._finalize(message.content)
             if tool_rounds >= MAX_TOOL_ROUNDS:
                 return self._force_conclusion(on_delta)
             self.messages.append(_assistant_message_dict(message))
@@ -165,6 +175,14 @@ class Agent:
                     {"role": "tool", "tool_call_id": call.id, "content": result}
                 )
             tool_rounds += 1
+
+    def _finalize(self, content: str | None) -> str:
+        """记录最终回答并返回；空回答不静默（§3.4），以可读错误上抛并作废本轮。"""
+        text = content or ""
+        if not text.strip():
+            raise llm.LLMError("模型返回了空回答，请重试或换个问法。")
+        self.messages.append({"role": "assistant", "content": text})
+        return text
 
     def _force_conclusion(self, on_delta: DeltaCallback | None) -> str:
         """达到最大工具轮次：丢弃刚收到的 tool_calls 响应（不落库），注入指令后
@@ -182,8 +200,7 @@ class Agent:
             self.client, self.model, self.messages, tools=None, stream=True, on_delta=on_delta
         )
         self._absorb_usage(response.total_tokens)
-        self.messages.append({"role": "assistant", "content": response.message.content or ""})
-        return response.message.content or ""
+        return self._finalize(response.message.content)
 
     def _absorb_usage(self, total_tokens: int | None) -> None:
         """记录真实 usage 并按需触发轮次截断（每轮响应后检查，含工具轮）。"""

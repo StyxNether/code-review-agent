@@ -217,6 +217,7 @@ class TestTruncateRounds:
         messages = [{"role": "system", "content": "S"}, *make_round("u1", with_tools=False)]
         result = truncate_rounds(messages, usage_total_tokens=100, max_tokens=200)
         assert result == messages
+        assert result is not messages  # 未触发截断也返回副本（纯函数语义）
 
     def test_none_usage_untouched(self) -> None:
         messages = [{"role": "system", "content": "S"}, *make_round("u1", with_tools=False)]
@@ -242,6 +243,7 @@ class TestTruncateRounds:
         result = truncate_rounds(messages, usage_total_tokens=999_999, max_tokens=10)
 
         assert result == messages  # 单轮不可拆：宁可超限也不产生非法结构
+        assert result is not messages  # 且始终返回副本（纯函数语义）
 
     def test_directive_user_message_is_a_valid_boundary(self) -> None:
         # max-rounds 指令也是 user 消息：以它为界丢弃旧前缀后结构仍合法
@@ -324,4 +326,72 @@ class TestInterrupt:
         with pytest.raises(KeyboardInterrupt):
             agent.run("刚输入的话")
 
+        assert agent.messages == [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    def test_interrupt_during_tool_execution_after_truncation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """回归（验收走查发现）：截断替换 messages 后，位置索引回滚会失位。
+
+        场景：本轮第一个请求触发截断（丢弃旧轮次、列表变短）→ 工具执行中 Ctrl+C
+        → 回滚必须按"本轮起始 user 消息"定位，否则残留孤儿 tool_calls（下轮 400）。
+        """
+        registry = ToolRegistry()
+
+        def ki_handler(text: str) -> str:
+            raise KeyboardInterrupt
+
+        registry.register(
+            name="ki",
+            description="执行时立即中断",
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+            handler=ki_handler,
+        )
+        agent = Agent(
+            client=object(), model="test-model", registry=registry, max_context_tokens=100
+        )
+        agent.messages += make_round("u1", with_tools=False, answer="已答")
+        script = [tool_response("c9", "ki", {"text": "x"}, total=50_000)]
+        monkeypatch.setattr(llm, "complete", lambda *args, **kwargs: script.pop(0))
+
+        with pytest.raises(KeyboardInterrupt):
+            agent.run("第二轮")
+
+        # 第一轮已被截断丢弃（usage 超阈值）；中断回滚再把"第二轮"整体作废——
+        # 旧实现此处会残留 [system, 第二轮, 孤儿 tool_calls]（下轮 API 400）
+        assert agent.messages == [{"role": "system", "content": SYSTEM_PROMPT}]
+        assert_rounds_atomic(agent.messages)
+
+    def test_llm_error_rolls_back_round(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent = Agent(client=object(), model="test-model", registry=make_registry())
+        agent.messages += make_round("u1", with_tools=False, answer="已答")
+
+        def failing_complete(*args: object, **kwargs: object) -> llm.LLMResponse:
+            raise llm.LLMError("网络中断")
+
+        monkeypatch.setattr(llm, "complete", failing_complete)
+
+        with pytest.raises(llm.LLMError, match="网络中断"):
+            agent.run("第二轮")
+
+        # 请求失败同样作废本轮：不留半截消息污染后续对话
+        assert agent.messages == [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "已答"},
+        ]
+
+    def test_empty_final_answer_raises_readable_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent, _ = make_agent(monkeypatch, [text_response("  ")])
+
+        with pytest.raises(llm.LLMError, match="空回答"):
+            agent.run("x")
+
+        # 空回答按本轮作废处理：不写入空 assistant 消息，也不静默吞掉（§3.4）
         assert agent.messages == [{"role": "system", "content": SYSTEM_PROMPT}]
