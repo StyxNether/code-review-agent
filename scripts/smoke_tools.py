@@ -1,34 +1,28 @@
-"""M0/M1 function calling 冒烟测试（全仓库唯一允许真实联网的脚本，AGENTS.md 工程规范）。
+"""function calling 冒烟测试（全仓库唯一允许真实联网的脚本，AGENTS.md 工程规范）。
 
-用最小哑工具 echo 验证 function calling 通路，与业务工具 schema 无关（Design.md §3）：
-1. 非流式：发送一次带 tools 参数的请求，确认模型（CRA_MODEL，默认 deepseek-flash）返回 tool_calls；
-   把 echo 执行结果作为 tool 消息回传，确认模型能给出最终回答。
-2. 流式（M1 追加）：验证流式响应的 tool_calls 分片可组装、末块携带 usage
-   （stream_options include_usage）、回传工具结果后能流式给出最终回答。
+M4 起走 LangChain 新栈（llm.create_model 的 ChatOpenAI，OpenAI 兼容），用最小哑
+工具 echo 验证模型通路，与业务工具 schema 无关（Design.md §3）：
+1. 非流式（llm.invoke_once 保留通路）：bind_tools 后请求，确认模型返回 tool_calls；
+   把 echo 执行结果作为 ToolMessage 回传，确认模型能给出最终回答。
+2. 流式：验证流式响应的 tool_call_chunks 可组装、末块携带 usage
+   （stream_usage=True）、回传工具结果后能流式给出最终回答。
 
 结论须记入 docs/PROGRESS.md。运行：uv run python scripts/smoke_tools.py
 """
 
 import json
 import sys
-from typing import Any
+
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool
 
 from cra import config, llm
 
-ECHO_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "echo",
-        "description": "原样返回输入文本。用于验证 function calling 通路。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "要回显的文本"}
-            },
-            "required": ["text"],
-        },
-    },
-}
+
+@tool
+def echo(text: str) -> str:
+    """原样返回输入文本。用于验证 function calling 通路。"""
+    return text
 
 
 def main() -> int:
@@ -40,40 +34,25 @@ def main() -> int:
         print("未设置环境变量 SE_CodeAgent，无法执行冒烟测试。")
         return 1
 
-    client = llm.create_client()
-    model = config.get_model()
-    messages: list[dict[str, str]] = [
-        {
-            "role": "user",
-            "content": '请调用 echo 工具，参数 text 传 "cra-smoke-ok"，不要自己回答。',
-        }
+    model = llm.create_model().bind_tools([echo])
+    print(f"模型：{config.get_model()}　接入点：{config.get_base_url()}")
+    messages = [
+        HumanMessage(content='请调用 echo 工具，参数 text 传 "cra-smoke-ok"，不要自己回答。')
     ]
 
-    print(f"模型：{model}　接入点：{config.get_base_url()}")
-    response = client.chat.completions.create(
-        model=model, messages=messages, tools=[ECHO_TOOL], temperature=0.2
-    )
-    message = response.choices[0].message
-    if not message.tool_calls:
-        print(f"[FAIL] 模型未返回 tool_calls，纯文本回复：{message.content!r}")
+    response = llm.invoke_once(model, messages)
+    if not response.tool_calls:
+        print(f"[FAIL] 模型未返回 tool_calls，纯文本回复：{response.text!r}")
         return 1
 
-    tool_call = message.tool_calls[0]
-    arguments = json.loads(tool_call.function.arguments)
-    echo_result = arguments.get("text", "")
-    print(
-        f"[PASS] 收到 tool_calls：name={tool_call.function.name} "
-        f"arguments={tool_call.function.arguments}"
-    )
+    call = response.tool_calls[0]
+    echo_result = call["args"].get("text", "")
+    print(f"[PASS] 收到 tool_calls：name={call['name']} arguments={json.dumps(call['args'])}")
 
-    messages.append(message)  # openai SDK 接受 pydantic 消息对象直接回传
-    messages.append(
-        {"role": "tool", "tool_call_id": tool_call.id, "content": echo_result}
-    )
-    final = client.chat.completions.create(
-        model=model, messages=messages, tools=[ECHO_TOOL], temperature=0.2
-    )
-    final_text = final.choices[0].message.content or ""
+    messages.append(response)
+    messages.append(ToolMessage(content=echo_result, tool_call_id=call["id"]))
+    final = llm.invoke_once(model, messages)
+    final_text = final.text
     print(f"工具回传后最终回答：{final_text!r}")
     if "cra-smoke-ok" not in final_text:
         print("[WARN] 最终回答未包含回显内容，tool 结果回传通路需人工复核")
@@ -83,83 +62,58 @@ def main() -> int:
 
 
 def smoke_streaming() -> int:
-    """流式通路（M1）：tool_calls 分片组装、include_usage usage、流式最终回答。"""
-    client = llm.create_client()
-    model = config.get_model()
-    messages: list[dict[str, Any]] = [
-        {
-            "role": "user",
-            "content": '请调用 echo 工具，参数 text 传 "cra-stream-ok"，不要自己回答。',
-        }
+    """流式通路：tool_call_chunks 组装、stream_usage usage、流式最终回答。"""
+    model = llm.create_model().bind_tools([echo])
+    messages = [
+        HumanMessage(content='请调用 echo 工具，参数 text 传 "cra-stream-ok"，不要自己回答。')
     ]
 
-    stream = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        tools=[ECHO_TOOL],
-        temperature=0.2,
-        stream=True,
-        stream_options={"include_usage": True},
-    )
-    fragments: dict[int, dict[str, Any]] = {}
+    fragments: dict[int, dict[str, object]] = {}
     total_tokens: int | None = None
-    for chunk in stream:
-        if chunk.usage is not None:
-            total_tokens = chunk.usage.total_tokens
-        if not chunk.choices:
-            continue  # 末块只携带 usage
-        delta = chunk.choices[0].delta
-        for piece in (delta.tool_calls if delta else None) or []:
-            slot = fragments.setdefault(piece.index, {"id": "", "name": "", "args": []})
-            if piece.id:
-                slot["id"] = piece.id
-            if piece.function:
-                if piece.function.name:
-                    slot["name"] = piece.function.name
-                if piece.function.arguments:
-                    slot["args"].append(piece.function.arguments)
-    stream.close()
+    for chunk in model.stream(messages):
+        if chunk.usage_metadata:
+            total_tokens = chunk.usage_metadata.get("total_tokens")
+        for piece in chunk.tool_call_chunks or []:
+            index = piece.get("index") or 0
+            slot = fragments.setdefault(index, {"id": "", "name": "", "args": []})
+            if piece.get("id"):
+                slot["id"] = piece["id"]
+            if piece.get("name"):
+                slot["name"] = piece["name"]
+            if piece.get("args"):
+                slot["args"].append(piece["args"])
 
     if not fragments:
-        print("[FAIL] 流式响应未返回 tool_calls 分片，统一流式方案不可行")
+        print("[FAIL] 流式响应未返回 tool_call_chunks，流式工具通路不可用")
         return 1
     slot = fragments[0]
-    arguments = "".join(slot["args"])
+    arguments = "".join(slot["args"])  # type: ignore[union-attr]
     print(f"[PASS] 流式收到 tool_calls：name={slot['name']} arguments={arguments}")
     if total_tokens is None:
-        print("[WARN] 末块未携带 usage（include_usage 未生效）；截断将安全降级为不触发")
+        print("[WARN] 流式末块未携带 usage（stream_usage 未生效）；截断将安全降级为不触发")
     else:
-        print(f"[PASS] 末块 usage.total_tokens={total_tokens}（include_usage 生效）")
+        print(f"[PASS] 末块 usage.total_tokens={total_tokens}（stream_usage 生效）")
 
     messages.append(
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
+        AIMessage(
+            content="",
+            tool_calls=[
                 {
-                    "id": slot["id"],
-                    "type": "function",
-                    "function": {"name": slot["name"], "arguments": arguments},
+                    "name": str(slot["name"]),
+                    "args": json.loads(str(arguments)),
+                    "id": str(slot["id"]),
+                    "type": "tool_call",
                 }
             ],
-        }
+        )
     )
     messages.append(
-        {"role": "tool", "tool_call_id": slot["id"], "content": json.loads(arguments).get("text", "")}
-    )
-    final_stream = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        tools=[ECHO_TOOL],
-        temperature=0.2,
-        stream=True,
-        stream_options={"include_usage": True},
+        ToolMessage(content=json.loads(str(arguments)).get("text", ""), tool_call_id=str(slot["id"]))
     )
     parts: list[str] = []
-    for chunk in final_stream:
-        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-            parts.append(chunk.choices[0].delta.content)
-    final_stream.close()
+    for chunk in model.stream(messages):
+        if chunk.text:
+            parts.append(chunk.text)
     final_text = "".join(parts)
     print(f"流式最终回答：{final_text!r}")
     if "cra-stream-ok" not in final_text:
@@ -171,6 +125,6 @@ def smoke_streaming() -> int:
 
 if __name__ == "__main__":
     exit_code = main()
-    print("\n--- 流式通路冒烟（M1 追加）---")
+    print("\n--- 流式通路冒烟 ---")
     exit_code = smoke_streaming() or exit_code
     sys.exit(exit_code)
