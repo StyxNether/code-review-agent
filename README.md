@@ -7,25 +7,28 @@
 ## 功能
 
 - 多轮对话式代码审查，具备上下文记忆（`/clear` 可随时清空重来）
-- Agent 自主调用工具：列目录 / 读文件 / 运行 Python 代码核实问题（ReAct 循环 + function calling）
+- Agent 自主调用工具：列目录 / 读文件 / 运行 Python 代码核实问题（基于 LangGraph 的 Agent 循环 + function calling）
 - 结构化审查结论：【严重/一般/建议】+ `文件:行号` + 修改建议
-- 流式彩色输出；LLM 调用失败自动指数退避重试
+- 流式彩色输出；LLM 瞬时失败自动重试（SDK 内建，认证错误快速失败）
 
 ## 架构
 
 ```
-┌──────────┐   user input    ┌──────────────┐   tools (JSON)  ┌──────────────┐
-│  cli.py  │ ──────────────► │   agent.py   │ ──────────────► │ DeepSeek API │
-│  REPL /  │ ◄────────────── │  ReAct loop  │ ◄────────────── │ (openai SDK) │
-│  render  │  stream + color └──────┬───────┘  tool_calls     └──────────────┘
-└──────────┘                        │
-                          ┌─────────▼────────┐
-                          │ tools / registry │
-                          └──────────────────┘
-                            list_dir / read_file / run_python
+┌──────────────┐  user input / CLI args  ┌──────────────┐   model I/O   ┌────────────────┐
+│    cli.py    │ ──────────────────────► │   agent.py   │ ────────────► │ langchain 1.x  │
+│ chat /渲染   │ ◄────────────────────── │ create_agent │ ◄──────────── │ ChatOpenAI     │
+└──────────────┘   stream + callbacks    │ 循环/上下文   │  tool_calls   │ (OpenAI 兼容)  │
+                                         └──────┬───────┘               └────────────────┘
+                                                │ @tool 桥接
+                                                ▼
+                                       ┌──────────────────┐
+                                       │ tools / registry │
+                                       └──────────────────┘
+                                         list_dir / read_file / run_python
 ```
 
-手写 ReAct Agent 循环（未使用 Agent 框架），设计理由与详细设计见 [docs/Design.md](docs/Design.md)。
+Agent 循环基于 LangChain 1.x `create_agent`（底层 LangGraph），工具、提示词与流式渲染为自研封装；
+分层设计与设计决策详见 [docs/Design.md](docs/Design.md)。
 
 ## 快速开始
 
