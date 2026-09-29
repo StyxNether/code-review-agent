@@ -14,6 +14,10 @@ from cra.tools import fs
 
 Handler = Callable[..., str]
 
+# 结构化错误文本的统一前缀：cli 据此区分"工具失败"与"正常结果"的显示；
+# fs.py 的错误文本也遵循该前缀约定，改前缀需两处同步
+ERROR_PREFIX = "错误："
+
 
 @dataclass(frozen=True)
 class Tool:
@@ -62,20 +66,23 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             available = ", ".join(self._tools) or "（无）"
-            return "错误：未注册的工具 '" + name + "'，可用工具：" + available
+            return ERROR_PREFIX + "未注册的工具 '" + name + "'，可用工具：" + available
         try:
             arguments = json.loads(arguments_json) if arguments_json.strip() else {}
         except json.JSONDecodeError as exc:
-            return "错误：工具 '" + name + "' 的参数不是合法 JSON：" + str(exc)
+            return ERROR_PREFIX + "工具 '" + name + "' 的参数不是合法 JSON：" + str(exc)
         if not isinstance(arguments, dict):
             return (
-                "错误：工具 '" + name + "' 的参数必须是 JSON 对象，收到："
+                ERROR_PREFIX
+                + "工具 '"
+                + name
+                + "' 的参数必须是 JSON 对象，收到："
                 + type(arguments).__name__
             )
         try:
             return str(tool.handler(**arguments))
         except Exception as exc:  # noqa: BLE001 — 设计要求：工具异常必须全部在此兜底回传模型（§5）
-            return "错误：工具 '" + name + "' 执行失败：" + str(exc)
+            return ERROR_PREFIX + "工具 '" + name + "' 执行失败：" + str(exc)
 
 
 def _build_default_registry() -> ToolRegistry:
