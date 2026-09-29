@@ -3,7 +3,7 @@
 《软件工程与项目实践》第 1 次作业 · 提交截止 2026-10-07 24:00（作业二将复用本项目成果，见 §2.2 与 §10）
 平台环境：Windows + Git Bash（PowerShell/CMD 兼容）。
 
-> 本文描述**目标形态**（含 M4/M5 排期内容）；截至 M3 收尾，代码与 README 仍为"手写循环 + openai SDK"形态，差异由 M4/M5 消除（§4 D12、§10）。
+> 本文描述**目标形态**；截至 M4 收尾，代码与 README 已完成 LangChain 迁移（§3/§4 D8），仅 M5 排期内容（§7 配置与 CLI 面、§10）仍属目标形态，差异由 M5 消除。
 
 ## 1. 项目概述
 
@@ -256,31 +256,31 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 
 | 项 | 估算 | 实际 |
 |----|------|------|
-| 总规模 | ~1000 LOC（含测试，git 统计为准） | 3273 LOC（截至 M3 收尾，src 1240 + tests 1857 + scripts 176）；M4/M5 完成后重估 |
+| 总规模 | ~1000 LOC（含测试，git 统计为准） | 3139 LOC（截至 M4 收尾：src 1241 + tests 1768 + scripts 130，`git ls-files "*.py"` 统计、fixtures 豁免）；M5 完成后重估 |
 | 人工投入 | 设计评审 0.5h + 里程碑验收 0.25h×n + 收尾 0.5h | M0–M2 验收实测共 22 分钟；此后未再逐项记录 |
 | AI 生成 | 全部实现代码与测试初稿 | 一致：AI 编码会话生成，人工评审设计、逐里程碑验收 |
 | 日历时间 | 2–3 天（4 个编码会话） | 1 天完成 M0–M3 编码与验收 |
-| M4 框架迁移 | 1 个编码会话；净变化 ±300 LOC 待实测（middleware/流式适配/无状态包装可能净增）+ 测试重写 ~400 行 | （待填） |
+| M4 框架迁移 | 1 个编码会话；净变化 ±300 LOC 待实测（middleware/流式适配/无状态包装可能净增）+ 测试重写 ~400 行 | 1 个编码会话；实测净 **-134 LOC**（3273 → 3139）：src +1（llm 应用层退避删除 vs middleware 新增相抵）、tests -89（SDK/框架内建行为不再需要应用层测试）、scripts -46（SDK 分片组装代码移交框架）；测试重写 58→58 项（test_agent 27→38、test_llm 29→20），总数 152→156 |
 | M5 配置与 CLI 面 | 1–2 个编码会话；净增 ~800–1200 LOC（含测试） | （待填） |
 
-### 8.2 代码评审 Checklist（M3 收尾门禁执行记录；M4/M5 收尾沿用本清单）
+### 8.2 代码评审 Checklist（收尾门禁；M0–M4 每次收尾逐项执行，当前记录：M4）
 
-- [x] 全仓库 grep 无明文密钥；key 读取点唯一（config 层） ✅（M3 执行；M5 引入配置文件后门禁改为"仓库内无明文密钥"，`~/.cra/` 为用户数据不在仓库）
-- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅
-- [x] `run_python` 有超时强杀与输出截断 ✅
-- [x] Agent 循环有最大工具轮次（10）限制 ✅
-- [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅
-- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅
-- [x] README 每条命令逐条实测可复制执行 ✅
-- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（152 项）
+- [x] 全仓库 grep 无明文密钥；key 读取点唯一（config 层） ✅（M4 复执行：grep 仅命中 `sk-你的key`/`sk-test` 占位文本；key 读取仍仅 config.get_api_key，llm/agent 不落 key 常量）
+- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅（M4：注册表 dispatch + wrap_tool_call 兜底 + ToolNode 兜底改写前缀，三层均结构化回传）
+- [x] `run_python` 有超时强杀与输出截断 ✅（M4 未改动工具层）
+- [x] Agent 循环有最大工具轮次（10）限制 ✅（M4：自定义 middleware 达限去工具 + 注入收尾指令，另加 recursion_limit 护栏）
+- [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅（M4：语义移至请求侧 middleware——正本保留完整历史，系统提示词经 system 通道注入）
+- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M4 复测，CLI 层未改动）
+- [x] README 每条命令逐条实测可复制执行 ✅（M4：uv sync / uv run cra chat（真实 API 预验多轮审查）/ uv run pytest / uv run ruff check . 全部实测）
+- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M4：156 项）
 - [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅
-- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅
+- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅（M4：框架类型不出 agent 层，cli 仍仅导入 LLMError 与 ERROR_PREFIX）
 - [x] `git status` 干净：无 venv/缓存/密钥/开发辅助文档被跟踪 ✅
-- [x] Design.md 与实现一致（模型、工具名、模块、入口、配置项、CLI 面） ✅（核对于 M3 收尾；本文现为 M4/M5 后的目标形态，落实后重新核对）
+- [x] Design.md 与实现一致（模型、工具名、模块、入口、配置项、CLI 面） ✅（M4 迁移后本文目标形态与实现已一致，逐项核对通过）
 
 ### 8.3 复盘、缺陷记录与 PIP
 
-- **缺陷记录**（M0–M3 验收与走查共 **19 项**，全部闭环、无遗留；M3 为历史挂账收口，无新增缺陷）：
+- **缺陷记录**（M0–M4 验收与走查共 19+3 项；M0–M3 的 19 项全部闭环、无遗留；M4 编码期 3 项现场闭环，无新增遗留）：
   - M0 验收 1 项：提示词角色未定义【一般】→ M1 prompts.py 落实。
   - M1 验收 1 项：输出文字堆叠不便阅读【建议】→ 修复轮 1（空行/加粗）。
   - M1 走查（cra 复审两轮）13 项：中断回滚索引失位致孤儿 tool_calls【严重】、空回答静默入库【一般】→ 修复轮 1；标记加粗漏标、围栏奇偶误判、工具失败判定、rich markup 注入、REPL 意外异常兜底、llm 异常包装扩大【一般 6】及显式化小项【建议 5】→ 修复轮 2。
@@ -288,6 +288,8 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
   - M2 验收 2 项：审查语言边界设置错误【一般】、修改建议格式与着色【建议】→ 修复轮（多语言放开、标记切片渲染）。
   - M2 修复轮自测回归 1 项：CommonMark flanking 规则致标记加粗失效【一般】→ 渲染改标记切片。
   - M3 挂账处置：finish_reason 透传、print/console 统一、指引跨平台化、_run_chat 可测性已落地；stream_options 不做降级重试（DeepSeek 实测支持，400 属参数错误、不在重试范围，有回归锁定）；截断 O(n²) 维持不改（消息规模小且截断罕见，两次评估结论一致）。
+  - M4 编码期 3 项（现场闭环）：① `translate_failure` 初稿误写 `return … from exc`（语法错误）→ 返回型翻译改手工设置 `__cause__`；② LangGraph 对传入消息对象原位分配 id，等值断言失配【测试】→ 测试改按语义形状比较（实现不受影响）；③ 达限"去工具"后框架走 `model.bind()` 而非 `bind_tools()`，假模型绑定日志缺该次记录【测试】→ 假模型补记 `bind()` 空绑定，机制经 `request.override` 锁定。
+- **框架 API 查证结论（M4，以 uv.lock 锁定版本实际行为为准）**：langchain 1.4.3 无 `modify_model_request` 钩子，改请求须经 `wrap_model_call` + `request.override()`（属性直赋已弃用）；系统提示词经独立 `system_message` 通道每次注入、不入图状态；ToolNode 对未知工具/参数校验失败的兜底文案为 `"Error: …"`，须改写为"错误："前缀回传模型（`wrap_tool_call` 统一拦截，含未知工具的 tool=None 短路）；模型节点按请求重新 `bind_tools`（去工具后走无工具的 `bind` 分支）；`stream_usage=True` 在 DeepSeek 真实流式下生效（冒烟 usage=371 tokens）；`ChatOpenAI` 的 temperature/timeout/max_retries/stream_usage 均以 pydantic 字段生效。**已知边界**：模型输出畸形 JSON 参数（invalid_tool_calls）时，框架在模型请求侧合成 "could not be executed" 提示（已归一为"错误："前缀）；混合有效+畸形调用的场景下该合成 ToolMessage 会进入图状态，其 tool_call_id 仅存在于 `invalid_tool_calls`（不入 API 序列化），对严格校验的服务端存在孤儿 tool 消息的理论风险——属罕见路径、框架自身行为，暂不自行规避，若实际供应商 400 再评估（如 fed 视图清洗）。
 - 估算偏差：规模见 §8.1（估算 ~1000 LOC → M3 收尾实测 3273 LOC）；人工投入与日历时间未逐项记录（见 §8.1 人工投入行）。
 - 过程问题：
 - PIP（下一项目为结对项目，将在本项目上增量开发与重构）：
