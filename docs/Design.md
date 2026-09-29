@@ -1,184 +1,296 @@
 # Design.md — 代码审查助手 code-review-agent
 
-《软件工程与项目实践》第 1 次作业 · 提交截止 2026-10-07 24:00
+《软件工程与项目实践》第 1 次作业 · 提交截止 2026-10-07 24:00（作业二将复用本项目成果，见 §2.2 与 §10）
 平台环境：Windows + Git Bash（PowerShell/CMD 兼容）。
 
 ## 1. 项目概述
 
-`cra` 是一个基于 LLM 的命令行代码审查助手：给定一段/一个/一组代码文件（任意文本型源码、脚本与配置文件，Python 为主），它以代码审查员身份给出问题清单（分级、定位、修改建议），并能在多轮对话中自主调用工具（读文件、运行代码）核实问题。
+`cra` 是一个基于 LLM 的命令行代码审查助手：给定一段/一个/一组代码文件（任意文本型源码、脚本与配置文件，Python 为主），它以代码审查员身份给出问题清单（分级、定位、修改建议），并能在多轮对话中自主调用工具（读文件、运行代码）核实问题。支持多供应商模型配置与脚本化调用。
 
-- 交付物：GitHub 私有仓库打包 + README.md / Design.md +（可选，用户自理）1 分钟演示视频；备份提交"学号姓名.rar"（<200M）至课程"001Homework1"。
+- 交付物：GitHub 私有仓库 + README.md / Design.md +（可选，用户自理）1 分钟演示视频；备份提交"学号姓名.rar"（<200M）至课程"001Homework1"。
 - 评分权重：功能完整性 40%（核心可用、边界情况）· Agent 架构 30%（设计模式、架构清晰度）· 代码质量 20% · 文档 10%。
 
 ## 2. 范围
 
+### 2.1 作业一范围
+
 | 级别 | 内容 |
 |------|------|
-| Must | 审查代码（任意文本型源码，Python 为主；M2 验收意见放开，原为仅 Python）；文件读取工具（列目录 + 读单文件）；代码执行工具（subprocess 限时 10s，本机运行非沙箱，限制明示）；多轮上下文记忆；指数退避重试；CLI（彩色流式输出，入口 `cra`）；pytest 测试集 |
-| Should | 审查结果导出 Markdown 报告；批量审查多文件 |
-| Won't | Web 界面；多语言**执行**（run_python 仅运行 Python，任意语言源码的审查不受限——M2 验收意见修订，原为"多语言支持（非 Python 文件给友好提示即止）"）；Docker 沙箱；联网搜索工具 |
+| Must | 审查代码（任意文本型源码，Python 为主）；文件读取工具（列目录 + 读单文件）；代码执行工具（subprocess 限时 10s，本机运行非沙箱，限制明示）；多轮上下文记忆；指数退避重试；CLI（彩色流式输出，入口 `cra`）；pytest 测试集；多供应商模型配置（`~/.cra/models.json` + 配置模式）；非交互审查模式 |
+| Should | 审查结果导出 Markdown 报告（`cra review -o` / `/export`）；批量审查多文件（`cra review` 多路径） |
+| Won't | Web 界面；多语言**执行**（run_python 仅运行 Python，任意语言源码的审查不受限）；Docker 沙箱；联网搜索工具；LLM 调用费用核算（只报 tokens） |
+
+### 2.2 与作业二的接缝（只留缝，不提前实现）
+
+作业二为 Simple Workflow MVP（2–3 个 Agent 协作、消息传递/状态共享、顺序流程控制，推荐条件分支/循环/并行），可复用本项目 Agent 作为 Workflow 节点。为此本设计预留三个接缝，在 M4/M5 落实：
+
+1. **Agent 即组件**：`Agent.run(input, callbacks) -> str` 是可编程调用接口，REPL/非交互模式只是它的两个外壳；作业二将其包装为工作流节点。
+2. **结构化输出**：`cra review --json` 按固定 JSON schema 输出分级问题清单，供下游 Agent 程序化消费（作业二"修复 Agent"）。
+3. **编排层就位**：单 Agent 循环基于 LangChain `create_agent`（底层 LangGraph）；作业二的工作流直接用 LangGraph `StateGraph` 组合节点（顺序/分支/并行/检查点为框架原语），无需二次迁移。
 
 ## 3. 总体架构
 
 ```
-┌──────────┐   user input    ┌──────────────┐   tools (JSON)  ┌──────────────┐
-│  cli.py  │ ──────────────► │   agent.py   │ ──────────────► │ DeepSeek API │
-│  REPL /  │ ◄────────────── │  ReAct loop  │ ◄────────────── │ (openai SDK) │
-│  render  │  stream + color └──────┬───────┘  tool_calls     └──────────────┘
-└──────────┘                        │
-                          ┌─────────▼────────┐
-                          │ tools / registry │
-                          └──────────────────┘
-                            list_dir / read_file / run_python
+┌──────────────┐  user input / CLI args   ┌──────────────┐   model I/O   ┌────────────────┐
+│    cli.py    │ ───────────────────────► │   agent.py   │ ────────────► │ langchain 1.x  │
+│ chat/review/ │ ◄─────────────────────── │ create_agent │ ◄──────────── │ ChatOpenAI     │
+│ config /渲染 │  stream + callbacks      │ 循环/上下文   │  tool_calls   │ (OpenAI 兼容)  │
+└──────────────┘                          └──────┬───────┘               └────────────────┘
+       │                                        │ @tool
+       │ ~/.cra/models.json                     ▼
+┌──────▼───────┐                        ┌──────────────┐
+│  config.py   │                        │ tools/ 注册表 │
+│ env + 文件   │                        │ fs / exec_py │
+└──────────────┘                        └──────────────┘
 ```
 
 模块划分（src 布局，包目录固定为 `src/cra`）：
 
 ```
 src/cra/
-  cli.py        # argparse + REPL 循环，rich 彩色流式渲染
-  agent.py      # ReAct 循环：messages 维护、tool_calls 分发、最大轮次、上下文截断
-  llm.py        # DeepSeek 客户端封装（openai SDK、指数退避重试）
+  cli.py        # argparse 子命令（chat/review/config）+ REPL + rich 流式彩色渲染
+  agent.py      # create_agent 封装：系统提示词组装、工具绑定、最大轮次、上下文截断、回调适配
+  llm.py        # ChatOpenAI 封装：客户端构建（base_url/api_key/温度/超时/重试/认证快速失败）
+  config.py     # 配置层：~/.cra/models.json 与环境变量的合并读取（唯一出入口）
+  prompts.py    # 系统提示词与审查输出格式约定
   tools/
-    __init__.py # 工具注册表：名称 → (JSON schema, handler)
+    __init__.py # 工具注册表：名称 → (JSON schema, handler)，@tool 包装入口
     fs.py       # list_dir、read_file
     exec_py.py  # run_python（subprocess 限时执行）
-  config.py     # 环境变量读取与默认值（见 §6 配置表）
-  prompts.py    # 系统提示词与审查输出格式约定
+  sessions.py   # 会话持久化（/save /load，M5 新增）
 scripts/
-  smoke_tools.py   # M0 冒烟测试（入库留存）：用最小哑工具（如 echo）验证 function calling 通路，与业务工具 schema 无关
+  smoke_tools.py   # 冒烟测试（入库留存）：真实网络验证 function calling 通路
 tests/
   fixtures/buggy_samples/   # 预埋已知问题的样例（黄金回归用例）
 ```
 
-### 3.1 Agent 循环（核心，评分权重最高）
+### 3.1 Agent 设计
 
-"输入 → 推理 → 工具调用 → 输出"的实现：
+"输入 → 推理 → 工具调用 → 输出"基于 LangChain 1.x `langchain.agents.create_agent` 实现（底层 LangGraph）：
 
-1. 用户输入追加进 `messages`；系统提示词常驻首位（角色 + 输出格式 + 工具使用策略）。
-2. 调用 LLM，传入工具注册表的 JSON schema（function calling）。**统一采用流式请求**（M1 实现修订，验收认可：轮次类型只能在响应返回后判定，无法预判；`tool_calls` 由分片按 index 组装、完整性与非流式等价，`usage` 经 `stream_options={"include_usage": true}` 在末块取得；工具轮不渲染文本增量，用户可见行为仍为"仅最终回答流式"）。
-3. 若响应含 `tool_calls`：逐个执行 handler → 结果作为 tool 角色消息追加 → 回到 2；**最大工具轮次 10**，超过则强制要求模型给出结论，防止失控。
-4. 否则流式输出最终回答：rich Console 逐段打印 + 终块 Markdown 渲染，**不使用 rich.Live**（Windows 传统控制台下 Live 重绘不可靠）。
-5. **上下文记忆** = `messages` 列表在 REPL 会话内持续存在。截断：以最近一次响应的 `usage.total_tokens` 超过 `CRA_MAX_CONTEXT_TOKENS`（默认 100000）为阈值；以**完整轮次**（用户消息 → 最终回答，含其间全部 tool 消息）为原子单位从最旧丢弃，保证 `tool_calls` 与其配对的 `tool` 消息不被拆散（拆散会导致 API 400）；系统提示词永远保留。
+1. 用户输入追加进会话消息；系统提示词常驻（角色 + 输出格式 + 工具使用策略，见 §3.3）。
+2. 模型客户端为 `ChatOpenAI`（OpenAI 兼容，`base_url`/`api_key` 来自配置层），`temperature=0.2`（输出稳定，黄金用例可复现），请求级超时 60s。
+3. 工具经 `@tool` 包装现有纯函数 handler；工具失败仍以"错误：…"结构化文本返回给模型（模型可自行调整策略），不向上抛出。模型返回未注册工具或参数不符时同样以结构化错误回传。
+4. **最大工具轮次 10**：达到上限后注入指令并以不带工具的调用强制收尾，保证循环必然终止。
+5. **上下文记忆** = 会话消息跨轮持续存在；截断语义与既有一致——以真实 usage 超过阈值（默认 100000 tokens）触发，按**完整轮次**原子丢弃、`tool_calls`/`tool` 配对不拆散、系统提示词永留（迁移后经 LangChain middleware 或等价钩子实现，语义由回归测试锁定）。
+6. **流式渲染**：最终回答的增量经回调链交给 cli 的渲染管线（逐段 Markdown + 分级标记着色）；工具轮不渲染文本增量。统一采用流式请求（轮次类型无法预判；usage 经响应元数据取得，缺失时截断不触发——安全降级）。
+7. `Agent.run(input, callbacks) -> str` 为可编程接口（§2.2 接缝 1）；任何异常（Ctrl+C 或请求失败）回滚本轮消息到合法前缀后原样上抛。
 
 ### 3.2 工具 schema
 
 | 工具 | 参数 | 行为与限制 |
 |------|------|-----------|
 | `list_dir` | `path` | 返回两层目录树；忽略 `.venv`、`__pycache__`、`.git`、`.pytest_cache`、`.ruff_cache` 与点开头的隐藏目录 |
-| `read_file` | `path`, `start?`, `end?` | 带行号返回内容；单次上限 **400 行**，超出提示用 start/end 分段；`start`/`end` 为 1-based 闭区间，非法区间（start>end、负数）返回结构化错误；二进制/解码失败返回结构化错误信息（回传模型） |
-| `run_python` | `code` 或 `path`（二选一）, `timeout?` | subprocess 运行，工作目录=进程启动目录（见下方通用规则）；默认 10s（`CRA_EXEC_TIMEOUT` 可调），Windows 下用 `taskkill /T /F` 强杀整棵进程树；返回 stdout/stderr/退出码；stdout/stderr 各截断至 **2000 字符**；**本机直接运行，非沙箱** |
+| `read_file` | `path`, `start?`, `end?` | 带行号返回内容；单次上限 **400 行**，超出提示用 start/end 分段；`start`/`end` 为 1-based 闭区间，非法区间返回结构化错误；二进制/解码失败返回结构化错误信息（回传模型） |
+| `run_python` | `code` 或 `path`（二选一）, `timeout?` | subprocess 运行，工作目录=进程启动目录；默认 10s（`CRA_EXEC_TIMEOUT` 可调），Windows 下 `taskkill /T /F` 强杀整棵进程树；返回 stdout/stderr/退出码；stdout/stderr 各截断至 **2000 字符**；**本机直接运行，非沙箱**；执行确认开关见 §7.4 |
 
-通用规则：三工具的相对路径一律相对**进程启动目录（cwd）**解析，不做"项目根"推断，run_python 的子进程工作目录同此；所有文件读取与子进程输出捕获**显式 `encoding='utf-8', errors='replace'`**（Windows 默认 cp936，否则 UTF-8 源码会读成乱码、子进程中文输出会解码崩溃），子进程环境可另设 `PYTHONIOENCODING=utf-8`。
+通用规则：三工具的相对路径一律相对**进程启动目录（cwd）**解析；所有文件读取与子进程输出捕获显式 `encoding='utf-8', errors='replace'`，子进程环境另设 `PYTHONIOENCODING=utf-8`。
 
 ### 3.3 系统提示词要点
 
-角色为资深代码审查员（Python 为主深耕，任意语言的源码、脚本与配置文件均可审查；执行验证仅 Python，其他语言静态审查并标注"不确定"）；输出固定结构：【严重/一般/建议】分级 + `文件:行号` + 问题 + 修改建议（修改建议独立成行、紧跟问题描述）；先调用工具核实再下结论；不确定的问题明确标注"不确定"，禁止编造行号或代码。该输出格式为**提示词约定**，全系统不做程序化校验/解析（不写格式断言测试）。
+角色为资深代码审查员（Python 为主深耕，任意语言的源码、脚本与配置文件均可审查；执行验证仅 Python，其他语言静态审查并标注"不确定"）；输出固定结构：【严重/一般/建议】分级 + `文件:行号` + 问题 + 修改建议（修改建议独立成行、紧跟问题描述）；先调用工具核实再下结论；不确定的问题明确标注"不确定"，禁止编造行号或代码。默认输出格式为**提示词约定**，不做程序化校验；`--json` 模式（§7.1）例外：按 §7.5 的 schema 程序化输出与校验。
 
-### 3.4 代码设计规范落点（第3讲：规范 = 风格 + 设计）
+### 3.4 代码设计规范落点
 
-风格层由 ruff 强制（§6）；设计层按以下原则执行，M3 Checklist 核对：
+风格层由 ruff 强制（§6）；设计层按以下原则执行，各里程碑收尾按 §8.2 Checklist 核对：
 
 | 原则 | 本项目落点 |
 |------|-----------|
-| 单一职责 | cli 只管交互与渲染；agent 只管循环与状态；llm 只管 API 与重试；tools 只管工具执行；config 是环境变量唯一出入口 |
-| 依赖与模块化 | 依赖方向单向：cli → agent → {llm, tools}；tools/llm 不反向 import agent/cli，不越层调用（cli 不直接调 llm）。**M0 过渡期豁免**：agent.py 尚未存在时允许 cli 直连 llm，M1 起必须收敛（列入 M1 重构点） |
-| 数据封装 | messages 结构与截断规则只存在于 agent.py；工具返回统一为字符串（错误也是字符串），注册表屏蔽 handler 细节 |
+| 单一职责 | cli 只管交互与渲染；agent 只管循环与状态；llm 只管模型客户端与重试；tools 只管工具执行；config 是配置唯一出入口 |
+| 依赖与模块化 | 依赖方向单向：cli → agent → {llm, tools}；tools/llm 不反向 import agent/cli。框架类型（LangChain 消息/流对象）不越过 agent 层向上暴露 |
+| 数据封装 | 会话消息结构与截断规则只存在于 agent.py；工具返回统一为字符串（错误也是字符串） |
 | 异常处理 | 按 §5：异常要么被结构化回传模型，要么给出用户可读报错，不允许静默吞掉 |
 | 性能 | 流式输出保证感知性能；工具调用有超时；上下文有截断阈值 |
-| 安全 | key 只在内存流转、永不落盘；run_python 限时 + 截断 + 限制声明（第3讲 Gab 教训：规范一丢，漏洞就来） |
+| 安全 | key 只在内存流转、不进仓库（用户目录配置文件除外，见 §7.4）；run_python 限时 + 截断 + 限制明示（第3讲 Gab 教训：规范一丢，漏洞就来） |
 
-## 4. 关键设计决策及理由
+## 4. 关键决策记录（ADR）
 
-| 决策 | 理由 |
-|------|------|
-| 手写 ReAct 循环，不用 LangChain 等框架 | 架构分占 30%：核心循环 <200 行，可控、可讲、可测；框架黑盒不利于架构叙述 |
-| DeepSeek + openai SDK（OpenAI 兼容） | 国内直连、成本低；换服务商只改 `CRA_BASE_URL` 与 `CRA_MODEL`。注意 DeepSeek 模型线已更新（`deepseek-flash` / `deepseek-v4-pro`），M0 必做 function calling 冒烟测试 |
-| function calling 降级预案 | 若 M0 冒烟发现 tool_calls 行为异常：降级为"JSON 模式"——提示词要求模型输出 `{"tool": ..., "args": ...}` 由循环解析，接口层按可替换设计 |
-| run_python 用 subprocess + 限时，不做沙箱 | 作业范围权衡；风险用"限制明示 + 超时强杀 + 输出截断"控制，README 与 `cra chat --help` 均声明（Checklist 有核对项） |
-| 上下文记忆 = messages 列表 + 轮次原子截断 | 原生、可解释、易测；摘要属 Should 外功能，明确不做 |
-| 仅 CLI | 作业允许二选一；聚焦 Agent 核心能力，Web 界面为 Won't |
-| 里程碑即增量（SCRUM 式迭代增量，第3讲） | 每个里程碑结束都交付一个"潜在可交付"的可用增量：M0 可单轮对话 → M1 可多轮工具审查 → M2 边界健壮 → M3 收尾；用户验收即持续反馈，回归测试保护既有增量；也为结对项目在本项目上"增量开发 + 重构"铺路 |
-| 为结对项目预留扩展接缝 | 工具注册表即插即用（新工具 = 注册一项）；CLI 子命令扩展位（Should 的 batch/report）；prompts 独立成模块——结对项目增量开发时无需重构骨架 |
+决策按日期记录，被取代的决策保留条目并标注状态——决策演化本身是项目过程的一部分。
+
+| # | 决策 | 状态 | 理由与后果 |
+|---|------|------|-----------|
+| D1 | 手写 ReAct 循环（消息列表 + function calling + 循环分发），不引入框架 | 已取代（→D8） | 作业一 M0–M3 以原生 API 路线实现并验收；吃透 Agent 原理、架构可讲可测。被取代原因见 D8 |
+| D2 | LLM 用 DeepSeek，OpenAI 兼容接口 | 采纳 | 国内直连、成本低；OpenAI 兼容接入点可替换服务商 |
+| D3 | 仅 CLI，入口 `cra`，不做 Web 界面 | 采纳 | 作业允许二选一；聚焦 Agent 核心能力 |
+| D4 | run_python 用 subprocess + 限时强杀，不做沙箱 | 采纳 | 作业范围权衡；风险用"限制明示 + 超时强杀 + 输出截断 + 可选执行确认"控制 |
+| D5 | 统一流式请求（轮次类型无法预判），工具轮不渲染增量 | 采纳 | tool_calls 分片组装完整性等价；用户可见行为为"仅最终回答流式"；不使用 rich.Live（Windows 控制台重绘不可靠） |
+| D6 | 上下文截断按完整轮次原子丢弃，系统提示词永留 | 采纳 | 拆散 tool_calls/tool 配对会导致 API 400；纯函数实现、回归锁定 |
+| D7 | 审查输出格式为提示词约定，不做程序化校验 | 采纳（由 D11 扩展） | 格式断言测试脆弱；`--json` 是显式例外（schema 校验） |
+| D8 | Agent 循环迁移至 LangChain 1.x `create_agent`（底层 LangGraph） | 采纳（2026-09-29，用户解除 D1） | 作业二要求 2–3 Agent 工作流并复用本项目：LangGraph 的节点/边/状态原语直接支撑编排与可扩展性（作业二评分项）；`create_agent` 为官方现行推荐 API；工具层/提示词/渲染/测试策略全部可复用。备选 AutoGen/CrewAI（多智能体叙事错位）、Dify（平台非库，违反仅 CLI）已排除；后果：接受框架版本漂移风险（§9），以 uv.lock 锁定管理 |
+| D9 | 多供应商模型配置：`~/.cra/models.json`（用户目录，仓库外）+ 环境变量回退 | 采纳 | 用户要求命令行配置供应商/密钥/模型；key 存用户目录可同时满足"配置体验"与"仓库无明文密钥"门禁；JSON 程序化读写优于 Markdown |
+| D10 | 非交互审查模式 `cra review`（含批量/报告导出/退出码） | 采纳 | CLI 审查工具的标配形态；一并落地 Should 两条；是作业二"Agent 即节点"的雏形 |
+| D11 | run_python 默认自动执行，`--ask-exec`/`/confirm` 可开启逐次确认 | 采纳 | 审查中执行验证是高频动作，默认打断伤体验；安全叙事由文档明示 + 可选开关表达 |
+| D12 | 文档以最终形态维护（不设版本号），决策历史由本表与 §8 PSP 附录承载 | 采纳 | 无需保留旧版本；决策演化靠 ADR 状态列追溯 |
 
 ## 5. 错误处理与重试
 
-- 启动校验：`SE_CodeAgent` 非空，否则打印设置指引后退出；**不校验格式**（合法格式的无效 key 由 API 认证环节暴露）。
-- LLM 调用：超时/限流/连接错误 → 指数退避重试（1s/2s/4s，最多 3 次；**请求级超时 60s**，llm.py 常量，不用 SDK 默认 600s），仍失败给出友好报错与排查建议；**认证类错误（401/403）快速失败、不重试**，输出可读的 key 排查指引。
-- 工具执行：handler 内所有异常捕获 → 结构化错误文本作为 tool 结果回传模型（模型可自行调整策略），REPL 不崩溃。模型返回**未注册工具名或参数不符 schema** 时同样以结构化错误文本回传（手工轻校验，不为此引入 jsonschema 依赖），不触发 API 重试。
-- `run_python`：超时强杀进程树（Windows 下确保子进程一并终止）；stdout/stderr 截断防刷屏。
-- `Ctrl+C`：中断当前生成——**任何中断（含工具执行中）必须把 messages 回滚到本轮开始前的合法前缀，丢弃未完成的 assistant/tool 消息并提示该轮作废**（残留半截消息会导致下一轮 API 400）；输入 `exit` 或再次 `Ctrl+C` 退出 REPL（Windows 控制台无 Ctrl+D EOF 语义）。
+行为契约（实现映射到 LangChain SDK 能力，由回归测试锁定）：
 
-## 6. 工程规格（编码会话照此施工）
+- 启动校验：无任何可用配置（配置文件与环境变量皆缺）时打印 `cra config` 设置指引后退出；**不校验 key 格式**（无效 key 由 API 认证环节暴露）。
+- LLM 调用：超时/限流/连接错误 → 指数退避重试（1s/2s/4s，最多 3 次；请求级超时 60s）；仍失败给出友好报错与排查建议；**认证类错误（401/403）快速失败、不重试**，输出 key 排查指引（跨平台：Windows setx / macOS-Linux export）。
+- 工具执行：handler 内所有异常捕获 → 结构化错误文本作为工具结果回传模型，REPL 不崩溃。
+- `run_python`：超时强杀进程树；stdout/stderr 截断防刷屏。
+- `Ctrl+C`：中断当前生成——任何中断必须把会话消息回滚到本轮开始前的合法前缀并提示该轮作废；输入 `exit` 或再次 `Ctrl+C` 退出 REPL。
 
-- 包管理：uv（≥0.12），`requires-python = ">=3.13"`，`.python-version` 固定 `3.13`。
-- **uv init 陷阱（M0 必读）**：仓库目录非空（已有 README.md 与 docs/，**不得覆盖或删除**）；`uv init --package --name code-review-agent` 生成的包目录名是 `code_review_agent`，必须重建/重命名为 `src/cra`，并在 pyproject 同步 `[tool.hatch.build.targets.wheel] packages = ["src/cra"]`。
-- 运行依赖：`openai`、`rich`。开发依赖：`pytest`、`ruff`（`uv add --dev`）。
-- 入口与 CLI 面：`[project.scripts]` → `cra = "cra.cli:main"`；子命令 `cra chat` 进入 REPL（本作业范围）；保留子命令扩展位（Should 的 batch / report 未来挂载）。REPL 内置命令（M1 实现）：`exit` 退出；`/clear` 将 messages **重置为初始状态（仅含系统提示词）**，角色与格式契约保留。空输入/纯空白直接进入下一轮提示、不调 API；多行粘贴不做特殊支持，系统提示词引导"整段代码先落盘成文件再审查"。
-- 配置（环境变量，统一在 `config.py` 读取）：
+## 6. 工程规格
+
+- 包管理：uv（≥0.12），`requires-python = ">=3.13"`，`.python-version` 固定 `3.13`；包目录 `src/cra`，hatchling 打包配置 `packages = ["src/cra"]`。
+- 运行依赖：`langchain>=1.0`、`langchain-openai>=1.0`、`rich`（M4 迁移时以 uv.lock 锁定）。开发依赖：`pytest`、`ruff`。新增依赖须先征得用户同意。
+- 入口与 CLI 面：`[project.scripts]` → `cra = "cra.cli:main"`；子命令 `chat` / `review` / `config`（§7）。全局安装：`uv tool install -e .` 后可直接 `cra`（README 载明）。
+- 配置（环境变量，作为 `~/.cra/models.json` 不存在时的回退，统一在 `config.py` 读取）：
 
 | 变量 | 必填 | 默认 | 说明 |
 |------|------|------|------|
-| `SE_CodeAgent` | 是 | — | DeepSeek API key（仅启动校验非空） |
-| `CRA_MODEL` | 否 | `deepseek-flash` | 模型名 |
-| `CRA_BASE_URL` | 否 | `https://api.deepseek.com` | OpenAI 兼容接入点 |
+| `SE_CodeAgent` | 回退必填 | — | DeepSeek API key（配置文件缺省时的回退） |
+| `CRA_MODEL` | 否 | `deepseek-flash` | 模型名回退 |
+| `CRA_BASE_URL` | 否 | `https://api.deepseek.com` | 接入点回退 |
 | `CRA_EXEC_TIMEOUT` | 否 | `10` | run_python 超时（秒） |
-| `CRA_MAX_CONTEXT_TOKENS` | 否 | `100000` | messages 截断阈值（tokens） |
+| `CRA_MAX_CONTEXT_TOKENS` | 否 | `100000` | 会话截断阈值（tokens） |
 
-- ruff：默认规则 + `line-length = 100`；pytest `testpaths = ["tests"]`，**测试内禁止真实网络调用（LLM 一律 mock），真实网络仅限 scripts/smoke_tools.py**。
-- LLM 请求参数：`temperature=0.2`（输出稳定，黄金用例可复现）；`max_tokens` 沿用服务商默认。
-- `.gitignore`：`.venv/`、`__pycache__/`、`.pytest_cache/`、`.ruff_cache/`、`dist/`、`.env`、`*.pyc`。
-- 仓库初始化（M0 执行）：`git init` → 首个 commit → `gh repo create code-review-agent --private --source .`（gh 已登录，若失败则提示用户网页手动建）。
+- ruff：默认规则 + `line-length = 100`；`tests/fixtures` 豁免（预埋样例属数据非业务代码）。
+- pytest `testpaths = ["tests"]`；**测试内禁止真实网络调用（LLM 一律 mock），真实网络仅限 scripts/smoke_tools.py**。
+- `.gitignore`：`.venv/`、`__pycache__/`、`.pytest_cache/`、`.ruff_cache/`、`dist/`、`.env`、`*.pyc`、`AGENTS.md`、`docs/PROGRESS.md`。开发辅助文档（AGENTS.md、PROGRESS.md）仅本地维护、不随仓库分发；仓库内交付文档为 README.md 与 Design.md。
+- 密钥边界：api_key 只允许出现在用户目录 `~/.cra/models.json`（§7.4）与进程内存；**仓库内任何文件、日志、测试样例、提交记录不得出现真实密钥**。
 
-## 7. AI 辅助开发披露
+## 7. 接口规格
 
-本项目采用"人机分工"的工程实践：**人**负责需求决策、架构设计评审、各里程碑验收（运行 + 抽查 + 测试）、推送与提交把关；**AI 编码会话**按本文档的冻结决策与工程规格生成代码与测试。流程为：设计文档先行（本文档经人工评审后才动工）→ 每里程碑由独立会话按 DoD 实现 → 人工验收通过后推送。过程中的估算、Checklist、复盘记录见第 8 节与 `docs/PROGRESS.md`。
+### 7.1 CLI 子命令
+
+```
+cra chat   [选项]                  # 进入对话式审查 REPL
+cra review <path...> | -  [选项]   # 非交互一次性审查（- 读 stdin；多路径=批量）
+cra config [test]                  # 交互式配置模式；test 为连通性自检
+cra --version                      # 版本号
+```
+
+`cra review` 选项：`-o <file>` 将审查结论写入 Markdown 报告；`--json` 以 §7.5 schema 输出结构化结果（stdout）；其余选项与 chat 一致。
+
+### 7.2 全局参数（chat / review 通用）
+
+| 参数 | 说明 |
+|------|------|
+| `--model <name>` / `--provider <name>` | 临时覆盖本次使用的模型/供应商（不改配置文件） |
+| `--no-stream` | 关闭流式渲染，整体输出 |
+| `--max-rounds <n>` | 覆盖最大工具轮次（默认 10） |
+| `--ask-exec` | run_python 执行前逐次人工确认（默认自动执行；REPL 内 `/confirm on|off` 同效） |
+
+### 7.3 REPL 内置命令
+
+| 命令 | 行为 |
+|------|------|
+| `/help` | 命令列表 |
+| `/clear` | 会话重置为仅含系统提示词（角色与格式契约保留） |
+| `/change model`（别名 `/model`） | 列出供应商及其模型清单，按序号选择；切换后上下文保留并打印提示 |
+| `/save [名称]` / `/load [名称]` | 会话持久化到 `~/.cra/sessions/` / 从文件恢复 |
+| `/undo` | 作废上一轮对话（回滚到上一轮开始前的状态） |
+| `/context` | 显示当前会话 token 用量与距截断阈值的余量 |
+| `/export [文件]` | 将最近一轮审查结论导出为 Markdown |
+| `/confirm [on|off]` | run_python 执行确认开关（默认 off） |
+| `exit`（或 Ctrl+C 两次） | 退出 |
+| `/` 以外的其余 `/xxx` | 按普通文本发送给模型 |
+
+### 7.4 配置文件 `~/.cra/models.json`
+
+```json
+{
+  "default": "deepseek/deepseek-flash",
+  "providers": [
+    {
+      "name": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "api_key": "sk-...",
+      "models": ["deepseek-flash", "deepseek-v4-pro"]
+    }
+  ]
+}
+```
+
+- 位置固定在**用户目录**（Windows 为 `%USERPROFILE%\.cra\`），不在仓库内、不随仓库分发；`cra config` 负责创建与编辑（交互式：增删供应商/模型、设默认、改 key；**同名供应商 + 同名模型**已存在时询问是否覆盖）。
+- 解析优先级：`--model/--provider` 参数 > 配置文件 `default` > 环境变量回退（`SE_CodeAgent`/`CRA_MODEL`/`CRA_BASE_URL`）。两者皆缺时打印 `cra config` 引导后退出。
+- `cra config test`：对每个供应商用当前 key 发一次 1-token 请求，报告 OK / 401（key 无效）/ 超时（网络不可达）。
+- 安全边界：该文件含明文 key，属用户本机数据的已知取舍（D9）；文档提示文件权限与备份注意事项，仓库侧由 .gitignore 与密钥门禁保证永不入库。
+
+### 7.5 退出码与结构化输出
+
+| 退出码 | 含义（`cra review`） |
+|--------|---------------------|
+| `0` | 审查完成，无【严重】问题 |
+| `1` | 审查完成，存在【严重】问题 |
+| `2` | 运行错误（配置缺失、网络/认证失败、文件不可读等） |
+
+`--json` 输出 schema（最终结论的结构化形态，供脚本与作业二下游 Agent 消费）：
+
+```json
+{
+  "file": "a.py",
+  "findings": [
+    {"severity": "严重|一般|建议", "location": "a.py:42", "issue": "…", "suggestion": "…", "uncertain": false}
+  ],
+  "summary": "整体评价一两句"
+}
+```
+
+`cra chat` 正常退出码 0；配置缺失退出码 2。
 
 ## 8. PSP 附录（轻量诚实版）
 
-**开发过程定位（第3讲）**：本计划即**增量开发**——每个里程碑交付一个可用增量，用户验收即持续反馈，回归测试保护既有增量，验收意见回灌下一里程碑（迭代）。代码审查按三级落地：**静态审查**（ruff + pytest 自动执行）、**动态审查**（用户验收中的实际运行检查）、**代码走查**（用户里程碑验收 + 会话收尾总结，审查范围 = 该里程碑 diff）、**结果记录**（PROGRESS.md 验收记录与一句意见）；M3 的 Checklist 是走查的最后一环。
+**开发过程定位（第3讲）**：本计划为**增量开发**——每个里程碑交付一个可用增量，用户验收即持续反馈，回归测试保护既有增量，验收意见回灌下一里程碑。代码审查按三级落地：**静态审查**（ruff + pytest）、**动态审查**（验收运行检查）、**代码走查**（验收 + 会话收尾总结，范围 = 该里程碑 diff）、**结果记录**（PROGRESS.md 验收记录）；§8.2 Checklist 是走查门禁。
 
-### 8.1 估算表（开发前估算，收尾时对照实际填偏差）
+### 8.1 估算表
 
-| 项 | 估算 | 实际（收尾填） |
-|----|------|----------------|
-| 总规模 | ~1000 LOC（含测试，git 统计为准） | **3273 LOC**（Python，`git ls-files "*.py"` 统计：src 1240 + tests 1857 + scripts 176；另有 docs ≈600 行）。约为估算 3 倍：主因 pytest 覆盖面按 DoD 逐里程碑扩大（测试占比 57%）与流式渲染/边界处理细节 |
-| 人工投入 | 设计评审 0.5h + 4×里程碑验收 0.25h + 收尾 0.5h = **2.0h** | M0–M2 验收实测共 22 分钟（PROGRESS 耗时表）；设计评审与 M3 验收、收尾由用户在耗时表补填 |
-| AI 生成 | 全部实现代码与测试初稿 | 一致：全部实现与测试由 AI 编码会话生成，人工评审设计、逐里程碑验收并把意见回灌修复轮 |
-| 日历时间 | 2–3 天（4 个编码会话，每个 30–90 分钟） | 1 天（2026-09-29 完成 M0–M2 编码+验收+修复轮与 M3 编码），快于估算 |
+| 项 | 估算 | 实际 |
+|----|------|------|
+| 总规模 | ~1000 LOC（含测试，git 统计为准） | 3273 LOC（截至 M3 收尾，src 1240 + tests 1857 + scripts 176）；M4/M5 完成后重估 |
+| 人工投入 | 设计评审 0.5h + 里程碑验收 0.25h×n + 收尾 0.5h | M0–M2 验收实测共 22 分钟；M3 及后续由用户在 PROGRESS.md 耗时表记录 |
+| AI 生成 | 全部实现代码与测试初稿 | 一致：AI 编码会话生成，人工评审设计、逐里程碑验收 |
+| 日历时间 | 2–3 天（4 个编码会话） | 1 天完成 M0–M3 编码与验收 |
+| M4 框架迁移 | 1 个编码会话；净变化 ≈ −200 LOC（框架替代手写循环）+ 测试重写 ~400 行 | （待填） |
+| M5 配置与 CLI 面 | 1–2 个编码会话；净增 ~800–1200 LOC（含测试） | （待填） |
 
-### 8.2 代码评审 Checklist（收尾门禁逐项执行，结果写回此处；M3 编码会话执行，2026-09-29）
+### 8.2 代码评审 Checklist（M3 收尾门禁执行记录；M4/M5 收尾沿用本清单）
 
-- [x] 全仓库 grep 无明文密钥；`SE_CodeAgent` 只经 `config.py` 从环境变量读取 ✅（`grep -rniE "sk-[a-z0-9]{8,}|api_key=…"` 于 src/tests/scripts/pyproject 无命中；`os.environ` 读取点仅 config.py——exec_py 的 `{**os.environ}` 是子进程继承边界，§9 已声明）
-- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅（grep 无 `except:`；注册表 dispatch 统一兜底为结构化错误文本，agent/cli 的异常路径均有处理与测试，无静默路径）
-- [x] `run_python` 有超时强杀与输出截断 ✅（exec_py：taskkill /T /F 杀进程树、stdout/stderr 各截 2000 字符；TestTimeout / TestTruncation 锁定）
-- [x] Agent 循环有最大工具轮次（10）限制 ✅（`MAX_TOOL_ROUNDS = 10`，超限丢弃响应并以不带 tools 的调用强制收尾；TestMaxToolRounds）
-- [x] 消息截断按完整轮次原子丢弃，`tool_calls`/`tool` 配对不被拆散，系统提示词保留 ✅（truncate_rounds 纯函数 + assert_rounds_atomic 多用例，含"截断后中断回滚"回归；M3 补边界：usage==阈值、超 1 token、估算收敛）
-- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M3 落实：chat 子命令 help+description、README「限制」小节；test_chat_help_declares_non_sandbox_and_timeout 锁定）
-- [x] README 每条命令逐条实测可复制执行 ✅（M3：`uv sync`、`uv run cra chat`（真实一轮含工具调用与流式渲染）、`uv run pytest`、`uv run ruff check .` 均执行通过；`setx` 为用户环境操作未实际执行，其指引文字与 config.py 读取行为已核对）
-- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（test_tools_fs / test_tools_exec / test_registry / test_agent / test_cli / test_llm / test_config，M3 收口共 152 项）
-- [x] ruff 全绿；公开函数有类型标注；命名自解释、无无意义缩写 ✅（`uv run ruff check .` 通过；公开函数均有标注与简短 docstring）
-- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import）✅（grep 证实 llm/tools/config/prompts 无 agent/cli 引用；cli 经 agent，仅另引入 `LLMError` 类型与 `ERROR_PREFIX` 常量，不直接发起请求、不直接执行工具）
-- [x] `git status` 干净：无 venv/缓存/密钥文件被跟踪 ✅（仅 untracked "Homework 1.pptx"，待用户决定是否入库；.gitignore 覆盖 .venv/缓存/.env/dist）
-- [x] Design.md 与实现一致（模型名、工具名、模块名、入口、配置项）✅（模型 deepseek-flash、三工具、src/cra 布局、`cra = "cra.cli:main"`、5 个配置项逐项核对一致；§3.1 流式表述已按 M1 实现修订如上）
+- [x] 全仓库 grep 无明文密钥；key 读取点唯一（config 层） ✅（M3 执行；M5 引入配置文件后门禁改为"仓库内无明文密钥"，`~/.cra/` 为用户数据不在仓库）
+- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅
+- [x] `run_python` 有超时强杀与输出截断 ✅
+- [x] Agent 循环有最大工具轮次（10）限制 ✅
+- [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅
+- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅
+- [x] README 每条命令逐条实测可复制执行 ✅
+- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（152 项）
+- [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅
+- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅
+- [x] `git status` 干净：无 venv/缓存/密钥/开发辅助文档被跟踪 ✅
+- [x] Design.md 与实现一致（模型、工具名、模块、入口、配置项、CLI 面） ✅
 
-### 8.3 复盘、缺陷记录与 PIP（收尾时填写）
+### 8.3 复盘、缺陷记录与 PIP
 
-- 缺陷记录（M3 填写）：各里程碑验收与走查共发现 **19 项**，全部闭环、无遗留缺陷：
-  - M0 验收（用户）：1 项——提示词角色未定义【一般】→ M1 prompts.py 落实。
-  - M1 验收（用户）：1 项——输出文字堆叠不便阅读【建议】→ M1 修复轮 1（空行/加粗）。
-  - M1 走查（cra 复审两轮）：13 项——中断回滚索引失位致孤儿 tool_calls【严重】、空回答静默入库【一般】→ 修复轮 1；标记加粗漏标、围栏奇偶误判、工具失败判定、rich markup 注入、REPL 意外异常兜底、llm 异常包装扩大【一般 6】及显式化小项【建议 5】→ 修复轮 2。
-  - M2 编码期（buggy_samples 回归）：1 项——read_file 空文件误报区间错误【一般】→ 现场修复（eadd0ee）。
-  - M2 验收（用户）：2 项——审查语言边界设置错误【一般】、修改建议格式与分级着色【建议】→ M2 修复轮（多语言放开、标记切片渲染）。
-  - M2 修复轮自测回归：1 项——CommonMark flanking 规则致标记加粗失效【一般】→ 渲染改标记切片（8ba765d）。
-  - M3 挂账清单处置：finish_reason 透传、print/console 输出统一、key 指引跨平台化、_run_chat 可测性均已落地；stream_options 不做降级重试（DeepSeek 实测支持，400 属参数错误不重试，已有回归锁定）、truncate O(n²) 复评维持不改（消息规模小且截断罕见，两轮评估结论一致，见 PROGRESS.md M3 记录）。
-- 估算偏差：（人工/规模/日历各实际 vs 估算——规模已填 §8.1，人工与日历由用户结合耗时表填写）
+- **缺陷记录**（M0–M3 验收与走查共 19 项，全部闭环、无遗留）：
+  - M0 验收 1 项：提示词角色未定义【一般】→ M1 prompts.py 落实。
+  - M1 验收 1 项：输出文字堆叠不便阅读【建议】→ 修复轮 1（空行/加粗）。
+  - M1 走查（cra 复审两轮）13 项：中断回滚索引失位致孤儿 tool_calls【严重】、空回答静默入库【一般】→ 修复轮 1；标记加粗漏标、围栏奇偶误判、工具失败判定、rich markup 注入、REPL 意外异常兜底、llm 异常包装扩大【一般 6】及显式化小项【建议 5】→ 修复轮 2。
+  - M2 编码期 1 项：read_file 空文件误报区间错误【一般】→ 现场修复。
+  - M2 验收 2 项：审查语言边界设置错误【一般】、修改建议格式与着色【建议】→ 修复轮（多语言放开、标记切片渲染）。
+  - M2 修复轮自测回归 1 项：CommonMark flanking 规则致标记加粗失效【一般】→ 渲染改标记切片。
+  - M3 挂账处置：finish_reason 透传、print/console 统一、指引跨平台化、_run_chat 可测性已落地；stream_options 不做降级重试、截断 O(n²) 维持不改（评估记录见 PROGRESS.md）。
+- 估算偏差：（人工/规模/日历——规模见 §8.1，其余由用户结合耗时表填写）
 - 过程问题：
-- PIP（下一项目——结对项目将在本项目上增量开发与重构——的改进项）：
+- PIP（结对项目将在本项目上增量开发与重构——的改进项）：
 
 ## 9. 风险与限制
 
-- DeepSeek V4 系列的 function calling 行为以 M0 冒烟测试为准，已预留 JSON 模式降级预案（见 §4）。
-- `run_python` 非沙箱：仅用于本地可信代码的审查场景，文档多处明示；子进程默认**继承父环境变量（含 `SE_CodeAgent`）**，属非沙箱已知边界，如需收紧可传入净化后的 env。
+- **框架版本漂移**（D8 后新增）：LangChain 迭代快，以 uv.lock 锁定版本；升级属重构，须回归全绿。
+- `run_python` 非沙箱：仅用于本地可信代码的审查场景，文档多处明示；子进程默认继承父环境变量（含 key），属已知边界，如需收紧可传入净化后的 env。
+- key 明文存于用户目录配置文件：用户本机数据的已知取舍（D9）；仓库侧以 .gitignore 与密钥门禁兜底，文档提示文件权限。
 - 审查质量依赖模型能力：对专有框架/最新库版本可能误报，提示词已要求标注"不确定"。
-- 上下文超长仅做轮次截断不做摘要（超出 Must 范围）。
+- 上下文超长仅做轮次截断不做摘要；usage 缺失（服务端不支持）时截断不触发（安全降级）。
+
+## 10. Roadmap 与 Backlog
+
+**已排期**（开工提示词见 PROGRESS.md）：
+
+- **M4 框架迁移**：langchain/langchain-openai 接入；llm.py → ChatOpenAI 封装；agent.py → create_agent 封装；工具 @tool 包装；行为不变（152 项回归保护）。
+- **M5 配置与 CLI 面**（两个增量，M5b 可裁剪）：M5a = models.json + `cra config`(+test) + 环境变量回退 + 首次引导；M5b = `cra review`（批量/`-o`/`--json`/退出码）+ 全局参数 + REPL 命令族（/help /save /load /undo /context /export /confirm）+ README 同步。
+
+**作业二规划**（Simple Workflow MVP，不提前实现）：代码审查工作流方向——以本项目 Agent 为节点（§2.2 接缝），LangGraph `StateGraph` 编排"编码→审查→修复"或同等流程；顺序执行为 MVP，分支/并行/日志追踪按作业二推荐项递增。
+
+**Backlog（未决功能池，新增功能先入池评审再排期）**：`--log-file` 本地调试日志；`/history` 会话消息摘要；累计 token 用量显示；多智能体协作/反思复核/RAG（作业二本体素材）；可视化编排界面（作业二可选项）。
