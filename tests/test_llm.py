@@ -251,6 +251,16 @@ class TestProbe:
     def test_ok(self) -> None:
         assert self._run() == ("ok", "")
 
+    def test_empty_key_reported_without_request(self) -> None:
+        """自审修复:空 key 不发到服务端换误导性 401,直接归入 error 并提示。"""
+        _ProbeFakeChatOpenAI.last_instance = None
+
+        status, detail = llm.probe(base_url="https://x", api_key="", model_name="m")
+
+        assert status == "error"
+        assert "key" in detail
+        assert _ProbeFakeChatOpenAI.last_instance is None  # 未发起请求
+
     def test_probe_uses_short_timeout_and_no_retry(self) -> None:
         """自检语义:短超时、显式 max_retries=0,不承担业务请求的重试。"""
         self._run()

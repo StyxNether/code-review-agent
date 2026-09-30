@@ -118,8 +118,12 @@ def probe(base_url: str, api_key: str, model_name: str) -> tuple[str, str]:
     返回 (状态, 详情)：ok / auth（401/403，key 无效）/ timeout（超时或网络不可达）/
     error（其余失败，详情为可读文本）。探测用短超时且显式 max_retries=0——自检
     的意义是快速反馈，不承担业务请求的重试语义。异常分类用 SDK 原始类型在本层
-    完成（LLMError 的文本面向用户排查，不适合程序化判定），返回纯字符串状态。
+    完成（LLMError 的文本面向用户排查，不适合程序化判定），返回纯字符串状态；
+    详情截断至 200 字符，防服务端响应体刷屏。
     """
+    if not api_key:
+        # 与 create_model 的显式校验一致：空 key 不应发到服务端换回误导性的 401
+        return "error", "API key 为空；请用 cra config 补充或设置环境变量 SE_CodeAgent。"
     model = ChatOpenAI(
         model=model_name,
         api_key=api_key,
@@ -132,10 +136,10 @@ def probe(base_url: str, api_key: str, model_name: str) -> tuple[str, str]:
         model.bind(max_tokens=PROBE_MAX_TOKENS).invoke([HumanMessage(content="ping")])
     except APIStatusError as exc:
         if exc.status_code in (401, 403):
-            return "auth", str(exc)
-        return "error", str(exc)
+            return "auth", str(exc)[:200]
+        return "error", str(exc)[:200]
     except (APITimeoutError, APIConnectionError) as exc:
-        return "timeout", str(exc)
+        return "timeout", str(exc)[:200]
     except Exception as exc:  # noqa: BLE001 — 自检兜底：任何失败都归入可报告的状态而非上抛
-        return "error", str(exc)
+        return "error", str(exc)[:200]
     return "ok", ""

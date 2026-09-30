@@ -173,6 +173,31 @@ class TestSaveRaw:
 
         assert not (home_dir / ".cra" / "models.json").exists()
 
+    def test_default_referencing_missing_provider_rejected_on_save(self, home_dir: Path) -> None:
+        """自审修复:写入侧做 default 引用完整性检查,问题在配置时即暴露。"""
+        bad = {"default": "ghost/m", "providers": _sample_providers()}
+
+        with pytest.raises(config.ConfigError, match="ghost"):
+            config.save_raw(bad)
+
+    def test_default_referencing_missing_model_rejected_on_save(self, home_dir: Path) -> None:
+        bad = {"default": "deepseek/gone", "providers": _sample_providers()}
+
+        with pytest.raises(config.ConfigError, match="gone"):
+            config.save_raw(bad)
+
+    def test_duplicate_provider_names_rejected(self, home_dir: Path) -> None:
+        """自审修复:供应商重名在加载/写入时拒绝(resolve 不再静默取第一个)。"""
+        bad = {
+            "providers": [
+                _provider_entry("dup", "https://x", ["m"]),
+                _provider_entry("dup", "https://y", ["m"]),
+            ]
+        }
+
+        with pytest.raises(config.ConfigError, match="重复"):
+            config.save_raw(bad)
+
 
 # ---- resolve:解析优先级与边界规则(§7.4)----
 

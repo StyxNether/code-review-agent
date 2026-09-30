@@ -23,11 +23,15 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class ResolvedModel:
-    """一次 LLM 连接的解析结果（§7.4）；provider 为 None 表示来自环境变量回退。"""
+    """一次 LLM 连接的解析结果（§7.4）；provider 为 None 表示来自环境变量回退。
+
+    api_key 恒为非空字符串：resolve 的所有返回路径都保证 key 存在（缺失时抛
+    ConfigError 或返回 None），调用方无须再做空值回退。
+    """
 
     model: str
     base_url: str
-    api_key: str | None
+    api_key: str
     provider: str | None
 
 
@@ -160,6 +164,22 @@ def validate_config(data: Any) -> None:
             raise ConfigError(
                 f"配置文件结构无效：default {default!r} 的供应商与模型名均不能为空。"
             )
+        # 引用完整性与供应商重名：问题在 cra config 写入时即暴露（手改文件在
+        # 加载时同样报错），不必等到运行期 resolve() 才失败
+        entry = next((item for item in providers if item.get("name") == provider_name), None)
+        if entry is None:
+            raise ConfigError(
+                f"配置文件结构无效：default 引用的供应商 '{provider_name}' 不存在。"
+            )
+        if model_name not in entry["models"]:
+            raise ConfigError(
+                f"配置文件结构无效：default 引用的模型 '{model_name}' 不在供应商 "
+                f"'{provider_name}' 的清单内。"
+            )
+    names = [item.get("name") for item in providers]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ConfigError(f"配置文件结构无效：供应商名重复：{', '.join(duplicates)}。")
 
 
 def _resolve_provider(

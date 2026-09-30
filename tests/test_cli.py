@@ -585,6 +585,15 @@ class TestReplCommands:
 class TestCliArgs:
     """§7.1/§7.2:子命令与全局参数解析。"""
 
+    def test_parse_index_rejects_zero_negative_and_non_ascii_digits(self) -> None:
+        """自审修复:0/负数/上标数字(isdigit 为 True 但 int 接受集不一致)全拒绝。"""
+        assert cli._parse_index("0", 3) is None
+        assert cli._parse_index("-1", 3) is None
+        assert cli._parse_index("²", 3) is None  # isdigit()==True 但 int() 抛错
+        assert cli._parse_index("9", 3) is None  # 越界
+        assert cli._parse_index(None, 3) is None
+        assert cli._parse_index("2", 3) == 1
+
     def test_version_flag(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as excinfo:
             _build_parser().parse_args(["--version"])

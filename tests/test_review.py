@@ -302,6 +302,35 @@ class TestRunReviewExitCodes:
         assert "# cra 审查报告" in text
         assert "审查结论文本。" in text
 
+    def test_report_marks_failed_file_chapter(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """cra 复审:失败的文件在报告中保留标题并标注缺章,标题与正文一致。"""
+        _patch_agent(monkeypatch)
+        ok_file = tmp_path / "ok.py"
+        ok_file.write_text("ok = 1", encoding="utf-8")
+        bad_file = tmp_path / "bad.py"
+        bad_file.write_text("bad = 2", encoding="utf-8")
+        report = tmp_path / "report.md"
+        # 第一个文件成功、第二个文件失败:按输入顺序编排脚本
+        replies = iter(["审查结论文本。"])
+
+        class _SeqAgent(_FakeReviewAgent):
+            def run(self, prompt: str, **kwargs: Any) -> str:
+                if "bad.py" in prompt:
+                    raise LLMError("网络失败")
+                return next(replies)
+
+        monkeypatch.setattr(cli, "Agent", _SeqAgent)
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._run_review(_review_args([str(ok_file), str(bad_file)], output=str(report)))
+
+        assert excinfo.value.code == 2
+        text = report.read_text(encoding="utf-8")
+        assert "ok.py" in text and "审查结论文本。" in text
+        assert bad_file.name in text and "审查失败" in text
+
     def test_json_mode_report_is_markdown_of_schema(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

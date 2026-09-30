@@ -19,6 +19,12 @@ class TestSessionPath:
         with pytest.raises(ValueError, match="非法"):
             sessions.session_path(bad)
 
+    @pytest.mark.parametrize("reserved", ["CON", "con.json", "NUL", "com1", "lpt1", "name."])
+    def test_windows_reserved_and_trailing_dot_rejected(self, reserved: str) -> None:
+        """自审修复:Windows 保留设备名与以点结尾的名称在写入时必失败,前置拒绝。"""
+        with pytest.raises(ValueError, match="不可用"):
+            sessions.session_path(reserved)
+
 
 class TestSaveLoad:
     def test_roundtrip(self, home_dir: Path) -> None:

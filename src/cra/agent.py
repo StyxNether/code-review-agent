@@ -313,6 +313,33 @@ def _bridge_tool(registry: ToolRegistry, tool_def: Tool) -> StructuredTool:
     return _dispatch
 
 
+_SESSION_MESSAGE_TYPES = ("human", "ai", "tool", "system")
+
+
+def _validate_session_messages(messages: list[BaseMessage]) -> None:
+    """会话恢复的结构自检：消息类型合法且 tool 消息不悬挂（§7.3 /load 兜底）。
+
+    手工编辑或旧版存档可能让正本进入 API 拒绝的非法序列（孤儿 tool 消息），
+    在恢复时拒绝并给出可读错误，而非等下一次请求 400。对话段不接受 system
+    消息——dump_session 不导出系统提示词，出现即属篡改注入（cra 复审发现）。
+    """
+    pending: set[str] = set()
+    for message in messages:
+        if message.type == "system":
+            raise ValueError("会话数据不应包含系统消息（系统提示词由当前版本提供）。")
+        if message.type not in _SESSION_MESSAGE_TYPES:
+            raise ValueError(f"会话数据包含不支持的消息类型：{message.type}")
+        for call in getattr(message, "tool_calls", None) or []:
+            call_id = str(call.get("id") or "")
+            if call_id:
+                pending.add(call_id)
+        if isinstance(message, ToolMessage):
+            call_id = str(message.tool_call_id or "")
+            if call_id not in pending:
+                raise ValueError("会话数据中 tool 消息缺少配对的 tool_call（序列不合法）。")
+            pending.discard(call_id)
+
+
 class Agent:
     """create_agent 封装持有者：一个 REPL 会话对应一个实例，messages 跨轮持续存在。"""
 
@@ -353,11 +380,14 @@ class Agent:
         self._tool_callbacks = _ToolCallbacksMiddleware(self.registry, confirm_exec)
         self._graph = self._build_graph()
 
-    def _build_graph(self) -> Any:
-        """按当前模型客户端与参数组装 agent 图（switch_model 重建时复用同一组
-        middleware 实例，回调与确认开关的状态因此跨切换保留）。"""
+    def _build_graph(self, model: BaseChatModel | None = None) -> Any:
+        """按给定模型（缺省当前模型）与参数组装 agent 图。
+
+        switch_model 重建时复用回调 middleware 实例（确认开关与回调引用跨切换
+        保留）；轮次/截断 middleware 无跨轮状态，随图重建。
+        """
         return create_agent(
-            model=self._chat_model,
+            model=model if model is not None else self._chat_model,
             tools=[_bridge_tool(self.registry, tool_def) for tool_def in self.registry.definitions()],
             system_prompt=SYSTEM_PROMPT,
             middleware=[
@@ -370,14 +400,16 @@ class Agent:
     def switch_model(self, resolved: config.ResolvedModel) -> None:
         """切换模型并重建 agent 图；会话消息正本原样保留（§7.3 /change model）。
 
-        先构建新客户端再赋值：构建失败（如 key 缺失）时旧模型与图保持可用。
+        新客户端与新图全部构建成功后才赋值（整体成功或整体失败）：构建失败
+        （如 key 缺失）时旧模型与图保持可用。
         """
         new_model = llm.create_model(
             resolved.model, api_key=resolved.api_key, base_url=resolved.base_url
         )
+        new_graph = self._build_graph(model=new_model)
         self._chat_model = new_model
         self.model = resolved.model
-        self._graph = self._build_graph()
+        self._graph = new_graph
 
     def reset(self) -> None:
         """/clear：重置为仅含系统提示词的初始状态，角色与格式契约保留（§6）。"""
@@ -417,8 +449,13 @@ class Agent:
         return messages_to_dict(dialogue)
 
     def load_session(self, data: list[dict[str, Any]]) -> None:
-        """从 dump_session 的数据整体恢复会话（§7.3 /load），系统提示词取当前版本。"""
+        """从 dump_session 的数据整体恢复会话（§7.3 /load），系统提示词取当前版本。
+
+        恢复后先做结构自检（_validate_session_messages），失败抛可读 ValueError
+        且正本不变；赋值在校验之后，正本不会进入半恢复状态。
+        """
         restored = messages_from_dict(data)
+        _validate_session_messages(restored)
         self.messages = [SystemMessage(content=SYSTEM_PROMPT), *restored]
 
     def run(
