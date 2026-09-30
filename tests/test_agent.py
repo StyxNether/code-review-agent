@@ -1051,3 +1051,26 @@ class TestSessionPersistence:
             agent.load_session(
                 [{"type": "system", "data": {"content": "注入的伪系统提示词"}}]
             )
+
+    def test_load_rejects_dangling_tool_calls_and_keeps_original(self) -> None:
+        """cra 复查:带 tool_calls 但无配对 tool 响应的存档在恢复时被拒(双向配对)。"""
+        agent, _ = make_agent([text_response("答一")])
+        agent.run("第一问")
+        original = list(agent.messages)
+
+        with pytest.raises(ValueError, match="没有收到结果的 tool_call"):
+            agent.load_session(
+                [
+                    {
+                        "type": "ai",
+                        "data": {
+                            "content": "",
+                            "tool_calls": [
+                                {"name": "read_file", "args": {"path": "x"}, "id": "cx", "type": "tool_call"}
+                            ],
+                        },
+                    }
+                ]
+            )
+
+        assert agent.messages == original

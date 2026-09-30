@@ -338,6 +338,10 @@ def _validate_session_messages(messages: list[BaseMessage]) -> None:
             if call_id not in pending:
                 raise ValueError("会话数据中 tool 消息缺少配对的 tool_call（序列不合法）。")
             pending.discard(call_id)
+    if pending:
+        # 反向配对：assistant 的 tool_calls 缺少 tool 响应（cra 复查发现），
+        # 放行会在下一次请求被 API 400 拒绝，取代本应在此处给出的可读错误
+        raise ValueError("会话数据中存在没有收到结果的 tool_call（序列不合法）。")
 
 
 class Agent:

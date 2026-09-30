@@ -1114,6 +1114,16 @@ def _run_review(args: argparse.Namespace) -> None:
         console.print("--max-rounds 必须是不小于 1 的整数。", style="red", markup=False)
         sys.exit(2)
     try:
+        _run_review_main(args, console)
+    except Exception as exc:  # noqa: BLE001 — §7.5 顶层兜底：未预期异常按运行错误退出 2；
+        # 禁止裸逃逸（Python 默认退出码 1 会伪装成"发现严重问题"）（cra 复查补齐）
+        console.print(f"[意外错误] {type(exc).__name__}: {exc}", style="red", markup=False)
+        sys.exit(2)
+
+
+def _run_review_main(args: argparse.Namespace, console: Console) -> None:
+    """_run_review 的受控主体；外层已提供顶层兜底。"""
+    try:
         files = _collect_review_files(args.paths)
     except _ReviewFileError as exc:
         console.print(str(exc), style="red", markup=False)

@@ -286,6 +286,25 @@ class TestRunReviewExitCodes:
         assert "--ask-exec" in capsys.readouterr().err
         assert _FakeReviewAgent.prompts == []  # 未发起任何审查
 
+    def test_unexpected_error_exits_2_not_1(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        """§7.5 顶层兜底:未预期异常按运行错误退出 2,禁止裸逃逸伪装成"发现严重问题"。"""
+        _patch_agent(monkeypatch)
+        target = tmp_path / "a.py"
+        target.write_text("x = 1", encoding="utf-8")
+
+        def broken_collect(_paths: list[str]) -> list[tuple[str, str]]:
+            raise RuntimeError("展开阶段意外缺陷")
+
+        monkeypatch.setattr(cli, "_collect_review_files", broken_collect)
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._run_review(_review_args([str(target)]))
+
+        assert excinfo.value.code == 2
+        assert "意外错误" in capsys.readouterr().err
+
     def test_report_written_to_output(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
