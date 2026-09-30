@@ -1,6 +1,7 @@
 """cli 单元：参数解析、分级标记着色渲染与围栏状态机、REPL 循环与设置指引
 （不产生真实终端输出，无网络）。"""
 
+import re
 import sys
 from typing import Any
 
@@ -183,6 +184,36 @@ class TestRunChat:
         assert narration_at < tool_at < answer_at  # 叙述 → 工具打点 → 最终回答 的时序
 
 
+def test_inline_marker_kept_on_one_line() -> None:
+    """回归（验收走查实测）：行内标记不再被 Markdown 片段自带换行拆成多行。"""
+    out = _render_segment("这里有个问题【严重】需要修复。")
+
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "这里有个问题" in lines[0] and "需要修复。" in lines[0]
+    assert "\x1b[1;31m【严重】" in lines[0]  # 标记着色不变
+
+
+def test_inline_marker_preserves_surrounding_text_and_space() -> None:
+    """拼接收敛行尾后，原文的词间空格与行内代码渲染保持不变。"""
+    out = _render_segment("检查 `x=1` 这里 【严重】 崩溃风险。")
+
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "检查" in lines[0] and "崩溃风险。" in lines[0]
+    assert "`x=1`" not in lines[0]  # 文本片仍经 Markdown 渲染（行内代码反引号不字面出现）
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", lines[0])  # 剥离样式码后比对原文空格
+    assert "这里 【严重】 崩溃风险。" in plain
+
+
+def test_marker_only_line_still_renders() -> None:
+    """整行只有一个标记（行首标记行）时正常渲染一次，不产生多余空行。"""
+    out = _render_segment("【建议】")
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert lines == ["【建议】"] or len(lines) == 1
+    assert "\x1b[1;32m【建议】" in out
+
+
 def test_flush_pending_renders_dim_plain_text_and_clears_buffer() -> None:
     """flush_pending：暗色平文落盘（非 Markdown 渲染），并清空缓冲。"""
     console = Console(record=True, width=120, force_terminal=True, color_system="truecolor")
@@ -196,6 +227,33 @@ def test_flush_pending_renders_dim_plain_text_and_clears_buffer() -> None:
     streamer.feed("最终回答段落。")
     streamer.finish()
     assert "最终回答段落" in console.export_text(styles=True)  # 缓冲已清空，正文正常渲染
+
+
+class _SilentAgent:
+    """不产生任何增量回调的假 Agent（兼容端点无文本增量的兜底路径验证）。"""
+
+    def __init__(self, **_kwargs: Any) -> None:
+        self.model = "test-model"
+
+    def reset(self) -> None:
+        pass
+
+    def run(self, user_input: str, **_kwargs: Any) -> str:
+        return "无增量完整回答。"
+
+
+def test_no_delta_answer_falls_back_to_return_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """验收走查建议：兼容端点不返回文本增量时，界面用返回值兜底而非空白。"""
+    monkeypatch.setenv("SE_CodeAgent", "sk-test")
+    monkeypatch.setattr(cli, "Agent", _SilentAgent)
+    inputs = iter(["问", "exit"])
+    monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+    cli._run_chat()
+
+    assert "无增量完整回答。" in capsys.readouterr().out
 
 
 def test_all_markers_bolded_in_one_segment() -> None:

@@ -107,6 +107,11 @@ class _StreamingMarkdown:
         self._has_output = False
         self._pending_break = False
 
+    @property
+    def has_output(self) -> bool:
+        """本轮是否已有任何可见输出（增量或冲洗的叙述）。"""
+        return self._has_output
+
     def mark_break(self) -> None:
         """在下一个段落前插入空行（工具打点与正文之间留出呼吸空间）。"""
         self._pending_break = True
@@ -188,20 +193,42 @@ class _StreamingMarkdown:
         self._console.print(Markdown("\n".join(chunk)))
 
     def _render_marked_line(self, line: str) -> None:
-        """单行按标记切片渲染：文本片 Markdown、标记片着色，同行拼接后换行。"""
+        """单行按标记切片渲染：文本片经 Markdown 渲染为 Text 片段、标记片着色，
+        拼为单行 Text 一次打印（验收走查修复：Markdown 片段自带换行与全宽填充，
+        逐片 print 会把行内标记拆成多行）。"""
+        line_text = Text()
         position = 0
         for match in _MARKER_RE.finditer(line):
             before = line[position : match.start()]
             if before:
-                self._console.print(Markdown(before), end="")
+                line_text += self._markdown_fragment(before)
+                if before[-1].isspace():
+                    line_text.append(" ")  # 片段行尾被收敛，恢复原文的词间空格
             marker = match.group(1)
-            self._console.print(Text(marker, style=_marker_style(marker)), end="")
+            line_text.append(marker, style=_marker_style(marker))
             position = match.end()
         tail = line[position:]
         if tail.strip():
-            self._console.print(Markdown(tail))
-        elif position > 0:
-            self._console.print()
+            if tail[0].isspace() and position > 0:
+                line_text.append(" ")  # 行中的尾片同理恢复首空格（行首缩进仍交 Markdown 语义）
+            line_text += self._markdown_fragment(tail)
+        self._console.print(line_text)
+
+    def _markdown_fragment(self, text: str) -> Text:
+        """单行 Markdown 文本片 → 带样式 Text（保留行内代码等渲染），供同行拼接。
+
+        Markdown 块渲染会把行右侧填充到控制台全宽且自带换行，直接 print 会拆行；
+        render_lines 取回段后收敛行尾空白，使多片可拼回一行（超长仍由 rich 软换行）。
+        """
+        rendered = Text()
+        for fragment_line in self._console.render_lines(
+            Markdown(text), self._console.options, pad=False, new_lines=False
+        ):
+            for segment in fragment_line:
+                if segment.text:
+                    rendered.append(segment.text, style=segment.style)
+        rendered.rstrip()  # 原地收敛 Markdown 的全宽填充（返回 None，不可链式）
+        return rendered
 
 
 def _run_turn(agent: Agent, console: Console, user_input: str) -> None:
@@ -220,12 +247,15 @@ def _run_turn(agent: Agent, console: Console, user_input: str) -> None:
         streamer.mark_break()
 
     try:
-        agent.run(
+        result = agent.run(
             user_input,
             on_tool=on_tool,
             on_tool_result=on_tool_result,
             on_delta=streamer.feed,
         )
+        if result and not streamer.has_output:
+            # 兼容端点可能不产生文本增量：界面不能因此空白，兜底渲染完整返回文本
+            streamer.feed(result)
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠ 本轮已中断作废。[/]")
     except LLMError as exc:  # 重试与错误细分在 M2 实现
