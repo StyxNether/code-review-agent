@@ -85,7 +85,7 @@ tests/
 |------|------|-----------|
 | `list_dir` | `path` | 返回两层目录树；忽略 `.venv`、`__pycache__`、`.git`、`.pytest_cache`、`.ruff_cache` 与点开头的隐藏目录 |
 | `read_file` | `path`, `start?`, `end?` | 带行号返回内容；单次上限 **400 行**，超出提示用 start/end 分段；`start`/`end` 为 1-based 闭区间，非法区间返回结构化错误；二进制/解码失败返回结构化错误信息（回传模型） |
-| `run_python` | `code` 或 `path`（二选一）, `timeout?` | subprocess 运行，工作目录=进程启动目录；默认 10s（`CRA_EXEC_TIMEOUT` 可调，上限 60 秒），Windows 下 `taskkill /T /F` 强杀整棵进程树；返回 stdout/stderr/退出码；stdout/stderr 各截断至 **2000 字符**；**本机直接运行，非沙箱**；执行确认开关见 §7.2/§7.3（`cra review` 非交互模式不支持 `--ask-exec`，指定时报错退出 2） |
+| `run_python` | `code` 或 `path`（二选一）, `timeout?` | subprocess 运行，工作目录=进程启动目录；默认 10s（`CRA_EXEC_TIMEOUT` 可调），与模型传参同标准校验（1~60 秒），Windows 下 `taskkill /T /F`、POSIX 下独立进程组 + `killpg` SIGKILL 强杀整棵进程树；子进程环境经净化后继承（剔除 `SE_CodeAgent` 与 `*API_KEY*` 型变量，大小写不敏感）；返回 stdout/stderr/退出码；stdout/stderr 各截断至 **2000 字符**；**本机直接运行，非沙箱**；执行确认开关见 §7.2/§7.3（`cra review` 非交互模式不支持 `--ask-exec`，指定时报错退出 2） |
 
 通用规则：三工具的相对路径一律相对**进程启动目录（cwd）**解析；所有文件读取与子进程输出捕获显式 `encoding='utf-8', errors='replace'`，子进程环境另设 `PYTHONIOENCODING=utf-8`。
 
@@ -104,7 +104,7 @@ tests/
 | 数据封装 | 会话消息结构与截断规则只存在于 agent.py；工具返回统一为字符串（错误也是字符串） |
 | 异常处理 | 按 §5：异常要么被结构化回传模型，要么给出用户可读报错，不允许静默吞掉 |
 | 性能 | 流式输出保证感知性能；工具调用有超时；上下文有截断阈值 |
-| 安全 | key 只在内存流转、不进仓库（用户目录配置文件除外，见 §7.4）；run_python 限时 + 截断 + 限制明示（第3讲 Gab 教训：规范一丢，漏洞就来） |
+| 安全 | key 只在内存流转、不进仓库（用户目录配置文件除外，见 §7.4），且不进入子进程环境（run_python 环境净化）；run_python 限时 + 截断 + 环境净化 + 限制明示（第3讲 Gab 教训：规范一丢，漏洞就来） |
 
 ## 4. 关键决策记录（ADR）
 
@@ -256,11 +256,11 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 
 | 项 | 估算 | 实际 |
 |----|------|------|
-| 总规模 | ~1000 LOC（含测试，git 统计为准） | 3340 LOC（截至 M4 修复轮：src 1306 + tests 1904 + scripts 130，`git ls-files "*.py"` 统计、fixtures 豁免）；M5/M6 完成后重估 |
+| 总规模 | ~1000 LOC（含测试，git 统计为准） | 3587 LOC（截至 M4 自审修复轮：src 1387 + tests 2070 + scripts 130，`git ls-files "*.py"` 统计、fixtures 豁免）；M5/M6 完成后重估 |
 | 人工投入 | 设计评审 0.5h + 里程碑验收 0.25h×n + 收尾 0.5h | M0–M2 验收实测共 22 分钟；此后未再逐项记录 |
 | AI 生成 | 全部实现代码与测试初稿 | 一致：AI 编码会话生成，人工评审设计、逐里程碑验收 |
 | 日历时间 | 2–3 天（4 个编码会话） | 1 天完成 M0–M3 编码与验收 |
-| M4 框架迁移 | 1 个编码会话；净变化 ±300 LOC 待实测（middleware/流式适配/无状态包装可能净增）+ 测试重写 ~400 行 | 1 个编码会话；迁移本体净 **-134 LOC**（3273 → 3139），验收修复轮 +201（叙述分流/护栏加固/回归用例）→ 3340；测试重写 56→58 项（test_agent 27→42、test_llm 29→20），总数 152→162 |
+| M4 框架迁移 | 1 个编码会话；净变化 ±300 LOC 待实测（middleware/流式适配/无状态包装可能净增）+ 测试重写 ~400 行 | 1 个编码会话；迁移本体净 **-134 LOC**（3273 → 3139），验收修复轮 +201、cra 自审修复轮 +247 → 3587；测试重写与增补 56→63 项（test_agent 27→43、test_llm 29→20、exec/cli 增补），总数 152→173 |
 | M5 配置与 CLI 面 | 1–2 个编码会话；净增 ~800–1200 LOC（含测试） | （待填） |
 
 ### 8.2 代码评审 Checklist（收尾门禁；M0–M4 每次收尾逐项执行，当前记录：M4）
@@ -272,7 +272,7 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 - [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅（M4：语义移至请求侧 middleware——正本保留完整历史，系统提示词经 system 通道注入）
 - [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M4 复测，CLI 层未改动）
 - [x] README 每条命令逐条实测可复制执行 ✅（M4：uv sync / uv run cra chat（真实 API 预验多轮审查）/ uv run pytest / uv run ruff check . 全部实测）
-- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M4 修复轮后：162 项）
+- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M4 自审修复轮后：173 项）
 - [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅
 - [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅（M4：框架类型不出 agent 层，cli 仍仅导入 LLMError 与 ERROR_PREFIX）
 - [x] `git status` 干净：无 venv/缓存/密钥/开发辅助文档被跟踪 ✅
@@ -297,6 +297,16 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
     - 【建议×4】`str(call.get(k, ""))` 对 None 值产出 "None" 串 → `or ""`；reset() 一并清理回调挂留引用；recursion_limit 的"每轮节点数"提为具名常量 `_NODES_PER_TOOL_ROUND`；token 估算加 1.2 倍安全余量（×0.6，中文占比高时防低估少丢，宁多丢不超限）。
     - 夹具建议（infinite_loop.py）：`__main__` 导入守卫 + 注释措辞收敛（明确"仅覆盖直接子进程强杀、/T 树杀路径未触及"）已落地；CPU 自旋保留（kill 语义与 sleep 循环等价，且保持 CPU 密集场景真实性）。
   - M4 修复轮附注：真实 API 实测逐 token 流式通路正常（320 个增量、拼接==返回值）；用户感知"一大段一次性出"源于段落批渲染 + 跨轮叙述累积两处，后者已由 cli 叙述分流修复，前者列入 M6。
+  - **M4 自审修复轮（2026-09-30，cra 自审回灌——用户指定固定流程：所有会话收尾前须用本项目 cra 审查本轮代码）**：
+    - 【严重·实证复现】run_python 子进程全量继承父环境，`SE_CodeAgent` 可被被审查代码经 `print(os.environ)` 读走并回传模型上下文 → 子进程环境净化：剔除 `SE_CodeAgent` 与 `*API_KEY*` 型变量。**一手发现**：实测环境中存在 `SE_CODEAGENT` 全大写变体（Windows 环境名不区分大小写，精确匹配过滤与应用侧读取各漏一边）→ 过滤必须大小写不敏感（`_is_credential_var` 独立成函数便于测试）。§9 的"继承父环境（含 key）已知边界"自此收紧为默认行为。
+    - 【一般】工具执行期间 Ctrl+C 残留子进程与管道（communicate 抛出后无回收）→ `except BaseException` 分支杀树 + 有限回收管道后原样上抛。
+    - 【一般】POSIX 分支 `proc.kill()` 只杀直接子进程，与"进程树强杀"表述不符 → `start_new_session` + `killpg` 整组 SIGKILL（子树自建进程组者除外，与 taskkill /T 边界一致）；POSIX 分支为源码审查级验证（开发机为 Windows）。
+    - 【一般】配置来源 `CRA_EXEC_TIMEOUT` 未与模型传参同标准校验（0/负值会伪装成"执行超时"）→ 同标准 1~60 校验，非法值返回指向配置的结构化错误（cra 自审发现）。
+    - 【一般】agent 正本写回在"新增消息为空"场景会把本轮 user 消息就地覆盖成回答 → 截断提示只写回本轮新增消息末条（new_messages[-1]）。
+    - 【建议】兼容端点无文本增量时界面空白 → run 返回值兜底渲染；【建议】行内分级标记被 Markdown 片段换行/全宽填充拆行（实测复现）→ 标记行改为片段渲染收敛后拼单行 Text（保留行内代码渲染与原文空格）；【建议】request.state["messages"] 裸索引 → `.get` 降级；【建议】模型通道归一改单次遍历、无变化直通；【建议】taskkill 调用异常兜底（不掩盖原始异常）。
+    - 未采纳：timeout 参数非整数类型校验——dispatch 已结构化兜底且可读（维持 M2 处置）。
+    - **dogfood 过程记录**：初审 5 项（配置超时/中断回收/过滤不可测/覆盖面/终审附注）→ 全部修复；复审确认三项已落地 + 2 项加固建议（1 采纳 1 维持）；另发现 SE_CODEAGENT 变体泄漏（本轮最有价值的一手发现）与一次模型 DSML 文本泄漏怪癖（deepseek-flash 把工具调用标记当正文输出，属模型侧行为，不处置）。
+    - 注：本轮 agent/cli/exe 修改各带回归用例；`grep` 复核无明文密钥（测试用假值 sk-secret-for-test 等）。
 - **框架 API 查证结论（M4，以 uv.lock 锁定版本实际行为为准）**：langchain 1.4.3 无 `modify_model_request` 钩子，改请求须经 `wrap_model_call` + `request.override()`（属性直赋已弃用）；系统提示词经独立 `system_message` 通道每次注入、不入图状态；ToolNode 对未知工具/参数校验失败的兜底文案为 `"Error: …"`，须改写为"错误："前缀回传模型（`wrap_tool_call` 统一拦截，含未知工具的 tool=None 短路）；模型节点按请求重新 `bind_tools`（去工具后走无工具的 `bind` 分支）；`stream_usage=True` 在 DeepSeek 真实流式下生效（冒烟 usage=371 tokens）；`ChatOpenAI` 的 temperature/timeout/max_retries/stream_usage 均以 pydantic 字段生效。**已知边界**：模型输出畸形 JSON 参数（invalid_tool_calls）时，框架在模型请求侧合成 "could not be executed" 提示（已归一为"错误："前缀）；混合有效+畸形调用的场景下该合成 ToolMessage 会进入图状态，其 tool_call_id 仅存在于 `invalid_tool_calls`（不入 API 序列化），对严格校验的服务端存在孤儿 tool 消息的理论风险——属罕见路径、框架自身行为，暂不自行规避，若实际供应商 400 再评估（如 fed 视图清洗）。
 - 估算偏差：规模见 §8.1（估算 ~1000 LOC → M3 收尾实测 3273 LOC）；人工投入与日历时间未逐项记录（见 §8.1 人工投入行）。
 - 过程问题：
@@ -306,7 +316,7 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 
 - **框架版本漂移**：LangChain 迭代快，以 uv.lock 锁定版本；升级属重构，须回归全绿。
 - **ChatOpenAI 按 OpenAI 官方 API 规范对齐**，非标字段（如 DeepSeek 的 `reasoning_content`）不被透传——已在 D8 取舍中接受；若未来需要深度适配特定供应商，再评估专用集成包（须征得同意）。usage 依赖显式 `stream_usage=True`，由回归测试锁定。
-- `run_python` 非沙箱：仅用于本地可信代码的审查场景，文档多处明示；子进程默认继承父环境变量（含 key），属已知边界，如需收紧可传入净化后的 env。**威胁模型**：被审查的第三方代码内容可构成对模型的间接提示注入、诱导自动执行任意本机代码——缓解：`--ask-exec`/`/confirm` 开关、工具 description 明示；目录白名单已入 Backlog 评估。
+- `run_python` 非沙箱：仅用于本地可信代码的审查场景，文档多处明示；子进程环境经净化后继承——剔除 `SE_CodeAgent` 与 `*API_KEY*` 型变量（大小写不敏感），key 不进入子进程、更不进入模型上下文（验收走查修复；名称黑名单无法覆盖"名字无害、值是凭证"的变量，属已知边界）。子进程仍拥有用户全部权限（非沙箱不变）。**威胁模型**：被审查的第三方代码内容可构成对模型的间接提示注入、诱导自动执行任意本机代码——缓解：`--ask-exec`/`/confirm` 开关、环境净化、工具 description 明示；目录白名单已入 Backlog 评估。
 - key 明文存于用户目录配置文件：用户本机数据的已知取舍（D9）；仓库侧以 .gitignore 与密钥门禁兜底，`cra config` 写入时提示文件权限与备份注意事项。
 - 审查质量依赖模型能力：对专有框架/最新库版本可能误报，提示词已要求标注"不确定"。
 - 上下文超长仅做轮次截断不做摘要；`CRA_MAX_CONTEXT_TOKENS` 应低于所选模型的上下文窗口，必要时自行调低；usage 缺失（服务端不支持）时截断不触发（安全降级）。
