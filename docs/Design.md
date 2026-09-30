@@ -3,7 +3,7 @@
 《软件工程与项目实践》第 1 次作业 · 提交截止 2026-10-07 24:00（作业二将复用本项目成果，见 §2.2 与 §10）
 平台环境：Windows + Git Bash（PowerShell/CMD 兼容）。
 
-> 本文描述**目标形态**；截至 M4 收尾，代码与 README 已完成 LangChain 迁移（§3/§4 D8），仅 M5 排期内容（§7 配置与 CLI 面、§10）仍属目标形态，差异由 M5 消除。
+> 本文描述**目标形态**；截至 M4 修复轮，代码与 README 已完成 LangChain 迁移（§3/§4 D8），仅 M5/M6 排期内容（§7 配置与 CLI 面、§10 流式体验）仍属目标形态，差异由 M5/M6 消除。
 
 ## 1. 项目概述
 
@@ -256,11 +256,11 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 
 | 项 | 估算 | 实际 |
 |----|------|------|
-| 总规模 | ~1000 LOC（含测试，git 统计为准） | 3139 LOC（截至 M4 收尾：src 1241 + tests 1768 + scripts 130，`git ls-files "*.py"` 统计、fixtures 豁免）；M5 完成后重估 |
+| 总规模 | ~1000 LOC（含测试，git 统计为准） | 3340 LOC（截至 M4 修复轮：src 1306 + tests 1904 + scripts 130，`git ls-files "*.py"` 统计、fixtures 豁免）；M5/M6 完成后重估 |
 | 人工投入 | 设计评审 0.5h + 里程碑验收 0.25h×n + 收尾 0.5h | M0–M2 验收实测共 22 分钟；此后未再逐项记录 |
 | AI 生成 | 全部实现代码与测试初稿 | 一致：AI 编码会话生成，人工评审设计、逐里程碑验收 |
 | 日历时间 | 2–3 天（4 个编码会话） | 1 天完成 M0–M3 编码与验收 |
-| M4 框架迁移 | 1 个编码会话；净变化 ±300 LOC 待实测（middleware/流式适配/无状态包装可能净增）+ 测试重写 ~400 行 | 1 个编码会话；实测净 **-134 LOC**（3273 → 3139）：src +1（llm 应用层退避删除 vs middleware 新增相抵）、tests -89（SDK/框架内建行为不再需要应用层测试）、scripts -46（SDK 分片组装代码移交框架）；测试重写 58→58 项（test_agent 27→38、test_llm 29→20），总数 152→156 |
+| M4 框架迁移 | 1 个编码会话；净变化 ±300 LOC 待实测（middleware/流式适配/无状态包装可能净增）+ 测试重写 ~400 行 | 1 个编码会话；迁移本体净 **-134 LOC**（3273 → 3139），验收修复轮 +201（叙述分流/护栏加固/回归用例）→ 3340；测试重写 56→58 项（test_agent 27→42、test_llm 29→20），总数 152→162 |
 | M5 配置与 CLI 面 | 1–2 个编码会话；净增 ~800–1200 LOC（含测试） | （待填） |
 
 ### 8.2 代码评审 Checklist（收尾门禁；M0–M4 每次收尾逐项执行，当前记录：M4）
@@ -272,7 +272,7 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 - [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅（M4：语义移至请求侧 middleware——正本保留完整历史，系统提示词经 system 通道注入）
 - [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M4 复测，CLI 层未改动）
 - [x] README 每条命令逐条实测可复制执行 ✅（M4：uv sync / uv run cra chat（真实 API 预验多轮审查）/ uv run pytest / uv run ruff check . 全部实测）
-- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M4：156 项）
+- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M4 修复轮后：162 项）
 - [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅
 - [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅（M4：框架类型不出 agent 层，cli 仍仅导入 LLMError 与 ERROR_PREFIX）
 - [x] `git status` 干净：无 venv/缓存/密钥/开发辅助文档被跟踪 ✅
@@ -289,6 +289,14 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
   - M2 修复轮自测回归 1 项：CommonMark flanking 规则致标记加粗失效【一般】→ 渲染改标记切片。
   - M3 挂账处置：finish_reason 透传、print/console 统一、指引跨平台化、_run_chat 可测性已落地；stream_options 不做降级重试（DeepSeek 实测支持，400 属参数错误、不在重试范围，有回归锁定）；截断 O(n²) 维持不改（消息规模小且截断罕见，两次评估结论一致）。
   - M4 编码期 3 项（现场闭环）：① `translate_failure` 初稿误写 `return … from exc`（语法错误）→ 返回型翻译改手工设置 `__cause__`；② LangGraph 对传入消息对象原位分配 id，等值断言失配【测试】→ 测试改按语义形状比较（实现不受影响）；③ 达限"去工具"后框架走 `model.bind()` 而非 `bind_tools()`，假模型绑定日志缺该次记录【测试】→ 假模型补记 `bind()` 空绑定，机制经 `request.override` 锁定。
+  - **M4 验收修复轮（2026-09-30，验收走查回灌）9 项**（自审复检 + 用户反馈，全部闭环）：
+    - 【一般·实证复现】"Error:" 前缀字符串匹配误伤工具正常输出（run_python 的 stdout 恰以 `Error:` 开头时被改写为"错误："并污染回传）→ 改为 **ToolMessage.status=="error" 语义字段判别**（`_normalize_framework_error`）：框架错误（校验失败/畸形参数）必为 error 状态、正常输出为 success，门禁不依赖框架文案；前缀剥离仅作文本清理，已归一消息防重复叠加。附带缓解"框架文案硬编码"风险（判别不再依赖 "Error:"/"could not be executed" 字面）。
+    - 【一般】回滚只删末条消息，覆盖不了"成功 extend 之后仍抛异常"的窄窗口（§5 本轮作废契约）→ 改为进入 try 前记录正本前缀长度，异常按 `del self.messages[prefix_length:]` 截断。
+    - 【一般】达限收尾指令以伪造 user 消息注入请求，恰构成截断的"轮次边界"——极端场景下截断会保留孤立指令、丢弃全部真实上下文 → 收尾指令改经 **system 通道追加**（不产生伪造 user 消息，轮次边界只认真实输入；指令不落正本不变）。
+    - 【一般】on_tool_result 三分支触发条件不一致（正常分支要求非空才回调）→ 统一为每分支必然触发一次（空串也回调），协议对调用方一致。
+    - 【建议×4】`str(call.get(k, ""))` 对 None 值产出 "None" 串 → `or ""`；reset() 一并清理回调挂留引用；recursion_limit 的"每轮节点数"提为具名常量 `_NODES_PER_TOOL_ROUND`；token 估算加 1.2 倍安全余量（×0.6，中文占比高时防低估少丢，宁多丢不超限）。
+    - 夹具建议（infinite_loop.py）：`__main__` 导入守卫 + 注释措辞收敛（明确"仅覆盖直接子进程强杀、/T 树杀路径未触及"）已落地；CPU 自旋保留（kill 语义与 sleep 循环等价，且保持 CPU 密集场景真实性）。
+  - M4 修复轮附注：真实 API 实测逐 token 流式通路正常（320 个增量、拼接==返回值）；用户感知"一大段一次性出"源于段落批渲染 + 跨轮叙述累积两处，后者已由 cli 叙述分流修复，前者列入 M6。
 - **框架 API 查证结论（M4，以 uv.lock 锁定版本实际行为为准）**：langchain 1.4.3 无 `modify_model_request` 钩子，改请求须经 `wrap_model_call` + `request.override()`（属性直赋已弃用）；系统提示词经独立 `system_message` 通道每次注入、不入图状态；ToolNode 对未知工具/参数校验失败的兜底文案为 `"Error: …"`，须改写为"错误："前缀回传模型（`wrap_tool_call` 统一拦截，含未知工具的 tool=None 短路）；模型节点按请求重新 `bind_tools`（去工具后走无工具的 `bind` 分支）；`stream_usage=True` 在 DeepSeek 真实流式下生效（冒烟 usage=371 tokens）；`ChatOpenAI` 的 temperature/timeout/max_retries/stream_usage 均以 pydantic 字段生效。**已知边界**：模型输出畸形 JSON 参数（invalid_tool_calls）时，框架在模型请求侧合成 "could not be executed" 提示（已归一为"错误："前缀）；混合有效+畸形调用的场景下该合成 ToolMessage 会进入图状态，其 tool_call_id 仅存在于 `invalid_tool_calls`（不入 API 序列化），对严格校验的服务端存在孤儿 tool 消息的理论风险——属罕见路径、框架自身行为，暂不自行规避，若实际供应商 400 再评估（如 fed 视图清洗）。
 - 估算偏差：规模见 §8.1（估算 ~1000 LOC → M3 收尾实测 3273 LOC）；人工投入与日历时间未逐项记录（见 §8.1 人工投入行）。
 - 过程问题：
@@ -309,6 +317,11 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 
 - **M4 框架迁移**：langchain/langchain-openai 接入；llm.py → ChatOpenAI 封装；agent.py → create_agent 封装；工具 @tool 包装；行为不变（152 项回归保护）。
 - **M5 配置与 CLI 面**（两个增量，M5b 可裁剪）：M5a = models.json + `cra config`(+test) + 环境变量回退 + 首次引导 + `/change model`；M5b = `cra review`（批量/`-o`/`--json`/退出码）+ 全局参数 + REPL 命令族（/help /save /load /undo /context /export /confirm）+ README 同步。
+- **M6 流式过程体验**（M4 验收意见回灌，M5 后执行；目标：向"正规 Agent"的过程可见性靠拢）：
+  1. 渲染粒度：段落批渲染 → 行/句级流式评估与实现（Markdown 完整性保护：围栏/列表中间不切段；权衡记录进 ADR）；
+  2. 过程/正文分层：工具轮过程叙述与最终回答的样式区分强化（M4 修复轮已完成最小分流：叙述随工具轮实时暗色显示）；
+  3. 思考过程展示：评估 DeepSeek `reasoning_content` 透传（与 D8"非标字段不透传"冲突，须专项评估并征得同意）或以提示词引导模型输出简短过程说明作为替代；
+  4. 可折叠过程展示可行性调研：传统终端无法真折叠已打印内容，候选方案=紧凑摘要行 + 可选重放 / Windows VT 序列 / rich Live 重绘（D5 曾因 Windows 控制台重绘不可靠排除，需重新评估条件）；不可行则明确结论并以紧凑展示替代。
 
 **作业二规划**（Simple Workflow MVP，不提前实现）：代码审查工作流方向——以本项目 Agent 为节点（§2.2 接缝），LangGraph `StateGraph` 编排"编码→审查→修复"或同等流程；顺序执行为 MVP，分支/并行/日志追踪按作业二推荐项递增。
 
