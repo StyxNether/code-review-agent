@@ -415,6 +415,23 @@ class TestFinalAnswerHandling:
         # 最终回答请求发生在追加 assistant 回答之前：正本去掉系统消息与末条回答
         assert fake.requests[-1] == [SystemMessage(content=SYSTEM_PROMPT), *agent.messages[1:-1]]
 
+    def test_no_new_messages_does_not_overwrite_user_input(self) -> None:
+        """回归（验收走查）：新增消息为空时不得把本轮 user 消息覆盖成回答。"""
+        agent, _ = make_agent([text_response("答", finish_reason="length")])
+        truncated_answer = text_response("答", finish_reason="length")
+
+        def fake_invoke(fed: list[BaseMessage], on_delta: object) -> tuple[dict[str, Any], AIMessage]:
+            return {"messages": list(fed)}, truncated_answer  # 仿佛本轮没有任何新增消息
+
+        agent._invoke = fake_invoke  # type: ignore[method-assign]
+
+        result = agent.run("x")
+
+        assert result.startswith("答")
+        # 正本仍是 [system, user]：截断提示无处写入，user 消息原样保留
+        assert len(agent.messages) == 2
+        assert agent.messages[-1].content == "x"
+
 
 class TestMaxToolRounds:
     def test_forces_conclusion_after_max_rounds(self) -> None:

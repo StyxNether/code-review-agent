@@ -188,12 +188,9 @@ class _ToolCallbacksMiddleware(AgentMiddleware):
     ) -> Any:
         """模型通道错误前缀归一：框架合成的错误提示（如畸形 JSON 参数）不经
         工具层、绕过 wrap_tool_call，在请求侧统一改写。"""
-        if not any(
-            isinstance(message, ToolMessage) and message.status == "error"
-            for message in request.messages
-        ):
-            return handler(request)
         normalized = [_normalize_framework_error(message) for message in request.messages]
+        if all(same is original for same, original in zip(normalized, request.messages)):
+            return handler(request)  # 无框架错误消息：原请求直通，不产生额外列表
         return handler(request.override(messages=normalized))
 
     def wrap_tool_call(
@@ -239,7 +236,7 @@ class _MaxToolRoundsMiddleware(AgentMiddleware):
         self.max_rounds = max_rounds
 
     def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Any]) -> Any:
-        if _rounds_this_run(request.state["messages"]) < self.max_rounds:
+        if _rounds_this_run(request.state.get("messages", [])) < self.max_rounds:
             return handler(request)
         directive = _forced_conclusion_directive(self.max_rounds)
         if request.system_message is not None:
@@ -268,7 +265,7 @@ class _ContextTrimMiddleware(AgentMiddleware):
     def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Any]) -> Any:
         trimmed = truncate_rounds(
             list(request.messages),
-            usage_total_tokens=_last_response_usage(request.state["messages"]),
+            usage_total_tokens=_last_response_usage(request.state.get("messages", [])),
             max_tokens=self.max_context_tokens,
         )
         return handler(request.override(messages=trimmed))
@@ -363,10 +360,13 @@ class Agent:
                 text += _LENGTH_TRUNCATION_NOTICE
                 if on_delta is not None:
                     on_delta(_LENGTH_TRUNCATION_NOTICE)
-            self.messages.extend(final_state["messages"][fed_length:])
-            if text != final_message.text:
-                # 截断提示同文入库（M3 行为等价）："继续"追问时模型可见截断状态
-                self.messages[-1] = final_message.model_copy(update={"content": text})
+            new_messages = list(final_state["messages"][fed_length:])
+            if truncated and new_messages:
+                # 截断提示同文入库（M3 行为等价）："继续"追问时模型可见截断状态。
+                # 只改写本轮新增消息的末条——正本末条在新增为空时是本轮 user 消息，
+                # 直接按 -1 定位会把它覆盖成回答（验收走查发现的越界覆盖缺陷）
+                new_messages[-1] = final_message.model_copy(update={"content": text})
+            self.messages.extend(new_messages)
             return text
         except BaseException:
             # §5：任何异常（中断/请求失败）都回滚本轮再上抛。图状态是一次性请求
