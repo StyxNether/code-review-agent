@@ -68,7 +68,11 @@ class TestSetupGuide:
 
 
 class _FakeAgent:
-    """替换真实 Agent：避免构造 OpenAI 客户端；记录 /clear 与对话轮次。"""
+    """替换真实 Agent：避免构造模型客户端；记录 /clear 与对话轮次。
+
+    run 按真实 Agent 的回调时序模拟：叙述增量 → 工具打点 → 最终回答增量
+    （供过程叙述分流的行为断言）。
+    """
 
     last: "_FakeAgent | None" = None
 
@@ -81,9 +85,17 @@ class _FakeAgent:
     def reset(self) -> None:
         self.reset_calls += 1
 
-    def run(self, user_input: str, **_kwargs: Any) -> str:
+    def run(self, user_input: str, **kwargs: Any) -> str:
         self.turns.append(user_input)
-        return "答"
+        on_delta = kwargs.get("on_delta")
+        on_tool = kwargs.get("on_tool")
+        if on_delta is not None:
+            on_delta("先看看文件再作答。")  # 工具轮伴随叙述（无段落空行）
+        if on_tool is not None:
+            on_tool("list_dir", "{}")
+        if on_delta is not None:
+            on_delta("最终回答正文。")
+        return "最终回答正文。"
 
 
 class TestRunChat:
@@ -151,6 +163,39 @@ class TestRunChat:
         assert _FakeAgent.last is not None
         assert _FakeAgent.last.turns == []
         assert capsys.readouterr().out.count("你>") == 3
+
+    def test_narration_flushed_before_tool_mark_and_answer_separate(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """M4 验收反馈：过程性叙述跟随工具轮实时暗色显示，不与最终回答堆叠。"""
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        inputs = iter(["审查 x.py", "exit"])
+        monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+        cli._run_chat()
+
+        out = capsys.readouterr().out
+        narration_at = out.find("先看看文件再作答。")
+        tool_at = out.find("⚙ list_dir")
+        answer_at = out.find("最终回答正文。")
+        assert narration_at != -1 and tool_at != -1 and answer_at != -1
+        assert narration_at < tool_at < answer_at  # 叙述 → 工具打点 → 最终回答 的时序
+
+
+def test_flush_pending_renders_dim_plain_text_and_clears_buffer() -> None:
+    """flush_pending：暗色平文落盘（非 Markdown 渲染），并清空缓冲。"""
+    console = Console(record=True, width=120, force_terminal=True, color_system="truecolor")
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("先看看 `夹具` 再答。")  # 无段落空行，feed 阶段不会渲染
+    streamer.flush_pending()
+    out = console.export_text(styles=True)
+
+    assert "先看看 `夹具` 再答。" in out  # 平文：反引号字面保留（未走 Markdown 渲染）
+    assert "\x1b[2m" in out  # dim 样式（与正文区分）
+    streamer.feed("最终回答段落。")
+    streamer.finish()
+    assert "最终回答段落" in console.export_text(styles=True)  # 缓冲已清空，正文正常渲染
 
 
 def test_all_markers_bolded_in_one_segment() -> None:

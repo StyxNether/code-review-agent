@@ -127,6 +127,20 @@ class _StreamingMarkdown:
             self._print_segment(self._buffer)
         self._buffer = ""
 
+    def flush_pending(self) -> None:
+        """把缓冲中未成段的文本按暗色平文落盘（工具轮伴随叙述的分流）。
+
+        过程性叙述通常不构成完整段落（无空行），若只等段落完成会跨工具轮累积、
+        与最终回答一起在流结束时批量出现（M4 验收反馈）；在工具打点前冲洗，叙述
+        即实时跟随其轮次显示。平文暗色：过程文本不作 Markdown 渲染、与正文区分。
+        """
+        if self._buffer.strip():
+            if self._has_output or self._pending_break:
+                self._console.print()
+            self._console.print(self._buffer.strip(), style="dim", markup=False, highlight=False)
+            self._has_output = True
+        self._buffer = ""
+
     def _paragraph_end(self) -> int:
         """下一个不在围栏内的空行（双换行）位置；没有则返回 -1。
 
@@ -195,6 +209,7 @@ def _run_turn(agent: Agent, console: Console, user_input: str) -> None:
     streamer = _StreamingMarkdown(console)
 
     def on_tool(name: str, args: str) -> None:
+        streamer.flush_pending()  # 过程性叙述先于工具打点落盘，不再与最终回答堆叠
         console.print(f"⚙ {name}({_short(args)})", style="dim", markup=False, highlight=False)
 
     def on_tool_result(result: str) -> None:
