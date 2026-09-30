@@ -14,7 +14,7 @@ import sys
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphRecursionError
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAIError
@@ -24,6 +24,8 @@ from cra import config
 REQUEST_TIMEOUT_SECONDS = 60  # 请求级超时（§3.1）：不用 SDK 默认 600s，避免失败请求长时间挂起
 TEMPERATURE = 0.2  # §6：输出稳定，黄金用例可复现
 MAX_RETRIES = 3  # D13：瞬时错误重试映射到 SDK（仅建连期，间隔以 SDK 实现为准）
+PROBE_TIMEOUT_SECONDS = 15  # cra config test 的自检超时：快速反馈，不等完整请求超时
+PROBE_MAX_TOKENS = 1  # §7.4：连通性自检只发一次 max_tokens=1 的最小请求
 
 
 def _key_hint() -> str:
@@ -46,20 +48,25 @@ class LLMError(RuntimeError):
     """LLM 请求失败（网络/超时/认证等），对上层屏蔽 openai SDK / LangGraph 异常类型。"""
 
 
-def create_model(model_name: str | None = None) -> ChatOpenAI:
-    """按 SE_CodeAgent / CRA_BASE_URL / CRA_MODEL 构建 OpenAI 兼容的 ChatOpenAI。
+def create_model(
+    model_name: str | None = None,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> ChatOpenAI:
+    """按显式连接参数或环境变量回退构建 OpenAI 兼容的 ChatOpenAI（§7.4）。
 
-    models.json 属 M5：现阶段配置全部走环境变量回退（config 层唯一出入口）。
+    api_key/base_url 缺省时走环境变量回退路径（config 层）；cra config test
+    传入各供应商自己的 key 与接入点。显式校验 key 非空：SDK 在 api_key 为 None
+    时会回退读取 OPENAI_API_KEY，可能把 OpenAI 的密钥发往 CRA_BASE_URL（§5）。
     """
-    api_key = config.get_api_key()
-    if not api_key:
-        # 显式校验：SDK 在 api_key 为 None 时会回退读取 OPENAI_API_KEY，可能把
-        # OpenAI 的密钥发往 CRA_BASE_URL（§5：key 只从 SE_CodeAgent 读取）
+    key = api_key if api_key is not None else config.get_api_key()
+    if not key:
         raise LLMError("未设置环境变量 SE_CodeAgent（DeepSeek API key）。")
     return ChatOpenAI(
         model=model_name if model_name is not None else config.get_model(),
-        api_key=api_key,
-        base_url=config.get_base_url(),
+        api_key=key,
+        base_url=base_url if base_url is not None else config.get_base_url(),
         temperature=TEMPERATURE,
         timeout=REQUEST_TIMEOUT_SECONDS,
         max_retries=MAX_RETRIES,
@@ -95,7 +102,7 @@ def translate_failure(exc: Exception) -> Exception:
 
 
 def invoke_once(model: BaseChatModel, messages: list[BaseMessage], **kwargs: Any) -> AIMessage:
-    """非流式单次调用（保留的调用路径：后续 --no-stream 与 cra config test 使用）。"""
+    """非流式单次调用（保留的调用路径：--no-stream 与 cra config test 使用）。"""
     try:
         return model.invoke(messages, **kwargs)
     except Exception as exc:
@@ -103,3 +110,32 @@ def invoke_once(model: BaseChatModel, messages: list[BaseMessage], **kwargs: Any
         if translated is exc:
             raise
         raise translated from exc
+
+
+def probe(base_url: str, api_key: str, model_name: str) -> tuple[str, str]:
+    """连通性自检（§7.4 cra config test）：发一次 max_tokens=1 的最小请求。
+
+    返回 (状态, 详情)：ok / auth（401/403，key 无效）/ timeout（超时或网络不可达）/
+    error（其余失败，详情为可读文本）。探测用短超时且显式 max_retries=0——自检
+    的意义是快速反馈，不承担业务请求的重试语义。异常分类用 SDK 原始类型在本层
+    完成（LLMError 的文本面向用户排查，不适合程序化判定），返回纯字符串状态。
+    """
+    model = ChatOpenAI(
+        model=model_name,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=TEMPERATURE,
+        timeout=PROBE_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    try:
+        model.bind(max_tokens=PROBE_MAX_TOKENS).invoke([HumanMessage(content="ping")])
+    except APIStatusError as exc:
+        if exc.status_code in (401, 403):
+            return "auth", str(exc)
+        return "error", str(exc)
+    except (APITimeoutError, APIConnectionError) as exc:
+        return "timeout", str(exc)
+    except Exception as exc:  # noqa: BLE001 — 自检兜底：任何失败都归入可报告的状态而非上抛
+        return "error", str(exc)
+    return "ok", ""

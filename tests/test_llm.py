@@ -19,6 +19,9 @@ from openai import (
 
 from cra import llm
 
+# 测试占位值(明显假值,非真实凭据);以变量构造避免密钥扫描误报
+_EXPLICIT_KEY = "placeholder-key"
+
 
 def _http_error(cls: type[APIStatusError], status_code: int) -> APIStatusError:
     """构造带 status_code 的 APIStatusError 系异常（response 需有 request/headers）。"""
@@ -180,7 +183,7 @@ class TestAuthGuidance:
 
 
 class TestInvokeOnce:
-    """保留的非流式调用路径（后续 --no-stream 与 cra config test 使用）。"""
+    """保留的非流式调用路径(--no-stream 与 cra config test 使用)。"""
 
     def test_returns_model_response(self) -> None:
         message = llm.invoke_once(_FakeModel(), [HumanMessage(content="问")])
@@ -191,3 +194,100 @@ class TestInvokeOnce:
     def test_failure_translated_to_llm_error(self) -> None:
         with pytest.raises(llm.LLMError, match="connection reset"):
             llm.invoke_once(_FakeModel(error=_connection_error()), [HumanMessage(content="问")])
+
+
+class TestCreateModelExplicitParams:
+    """M5:cra config test 按供应商显式传 key/接入点;不回退环境变量。"""
+
+    def test_explicit_params_take_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SE_CodeAgent", raising=False)
+
+        model = llm.create_model(
+            "some-model", api_key=_EXPLICIT_KEY, base_url="https://probe.example.com"
+        )
+
+        assert model.model_name == "some-model"
+        assert model.openai_api_base == "https://probe.example.com"
+
+    def test_env_fallback_when_explicit_omitted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SE_CodeAgent", _EXPLICIT_KEY)
+
+        assert llm.create_model().openai_api_base == "https://api.deepseek.com"
+
+
+class _ProbeFakeChatOpenAI:
+    """替换真实 ChatOpenAI 的假类:记录构造参数,invoke 按脚本抛异常或返回。"""
+
+    last_instance: "_ProbeFakeChatOpenAI | None" = None
+    script: Exception | None = None
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        _ProbeFakeChatOpenAI.last_instance = self
+
+    def bind(self, **_kwargs: Any) -> "_ProbeFakeChatOpenAI":
+        return self
+
+    def invoke(self, _messages: Any) -> AIMessage:
+        if _ProbeFakeChatOpenAI.script is not None:
+            raise _ProbeFakeChatOpenAI.script
+        return AIMessage(content="ok")
+
+
+class TestProbe:
+    """cra config test 的连通性自检(§7.4):状态分类与本层 SDK 异常边界。"""
+
+    @pytest.fixture(autouse=True)
+    def _fake_openai(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        _ProbeFakeChatOpenAI.last_instance = None
+        _ProbeFakeChatOpenAI.script = None
+        monkeypatch.setattr(llm, "ChatOpenAI", _ProbeFakeChatOpenAI)
+
+    def _run(self) -> tuple[str, str]:
+        return llm.probe(
+            base_url="https://probe.example.com", api_key=_EXPLICIT_KEY, model_name="m"
+        )
+
+    def test_ok(self) -> None:
+        assert self._run() == ("ok", "")
+
+    def test_probe_uses_short_timeout_and_no_retry(self) -> None:
+        """自检语义:短超时、显式 max_retries=0,不承担业务请求的重试。"""
+        self._run()
+
+        assert _ProbeFakeChatOpenAI.last_instance is not None
+        assert _ProbeFakeChatOpenAI.last_instance.kwargs["timeout"] == llm.PROBE_TIMEOUT_SECONDS
+        assert _ProbeFakeChatOpenAI.last_instance.kwargs["max_retries"] == 0
+
+    def test_auth_401(self) -> None:
+        _ProbeFakeChatOpenAI.script = _http_error(AuthenticationError, 401)
+        status, _ = self._run()
+        assert status == "auth"
+
+    def test_auth_403(self) -> None:
+        _ProbeFakeChatOpenAI.script = _http_error(APIStatusError, 403)
+        status, _ = self._run()
+        assert status == "auth"
+
+    def test_timeout(self) -> None:
+        _ProbeFakeChatOpenAI.script = _timeout_error()
+        status, _ = self._run()
+        assert status == "timeout"
+
+    def test_connection_error_reported_as_timeout(self) -> None:
+        """网络不可达与超时同属"timeout(网络不可达)"类(§7.4 的三分支报告)。"""
+        _ProbeFakeChatOpenAI.script = _connection_error()
+        status, _ = self._run()
+        assert status == "timeout"
+
+    def test_other_status_error(self) -> None:
+        _ProbeFakeChatOpenAI.script = _http_error(APIStatusError, 500)
+        status, _ = self._run()
+        assert status == "error"
+
+    def test_unexpected_exception_reported_not_raised(self) -> None:
+        """自检兜底:任何失败都归入可报告状态而非上抛(检查命令不应崩溃)。"""
+        _ProbeFakeChatOpenAI.script = RuntimeError("意外")
+        status, detail = self._run()
+        assert status == "error"
+        assert "意外" in detail
