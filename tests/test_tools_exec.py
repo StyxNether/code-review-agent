@@ -74,6 +74,18 @@ class TestArgValidation:
             assert result.startswith("错误")
             assert "60" in result
 
+    def test_config_timeout_validated_same_as_param(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """回归（cra 自审）：配置来源的超时与模型传参同标准校验，非法值不伪装成执行超时。"""
+        for bad in ("0", "-5", "61"):
+            monkeypatch.setenv("CRA_EXEC_TIMEOUT", bad)
+
+            result = exec_py.run_python(code="pass")
+
+            assert result.startswith("错误")
+            assert "CRA_EXEC_TIMEOUT" in result
+
     def test_missing_file_structured_error(self, tmp_path: Path) -> None:
         result = exec_py.run_python(path=str(tmp_path / "nope.py"))
 
@@ -122,6 +134,85 @@ class TestTimeout:
 
         assert result.startswith("错误：工具 'run_python' 执行失败")
         assert "超时" in result
+
+
+class TestEnvSanitization:
+    """验收走查修复：子进程环境剔除凭证变量，key 不得经输出回传模型上下文。"""
+
+    def test_agent_key_not_in_child_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SE_CodeAgent", "sk-secret-for-test")
+
+        result = exec_py.run_python(code="import os; print(os.environ.get('SE_CodeAgent'))")
+
+        assert "None" in result
+        assert "sk-secret-for-test" not in result
+
+    def test_agent_key_case_variant_filtered(self) -> None:
+        """回归（cra 自审实测）：Windows 环境名不区分大小写，全大写变体同样须剔除。"""
+        assert exec_py._is_credential_var("SE_CodeAgent")
+        assert exec_py._is_credential_var("SE_CODEAGENT")
+        assert exec_py._is_credential_var("OPENAI_API_KEY")
+        assert exec_py._is_credential_var("my_api_key")  # 大小写不敏感的超集过滤
+        assert not exec_py._is_credential_var("PATH")
+        assert not exec_py._is_credential_var("CRA_EXEC_TIMEOUT")
+
+        env = {**exec_py._sanitized_env()}
+        assert "SE_CODEAGENT" not in {name.upper() for name in env}
+
+    def test_generic_api_key_vars_filtered(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "k-openai")
+        monkeypatch.setenv("MY_API_KEY", "k-mine")
+
+        result = exec_py.run_python(
+            code="import os; print(bool(os.environ.get('OPENAI_API_KEY')), bool(os.environ.get('MY_API_KEY')))"
+        )
+
+        assert "False False" in result
+
+    def test_non_credential_vars_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CRA_TEST_MARKER", "kept")
+
+        result = exec_py.run_python(code="import os; print(os.environ.get('CRA_TEST_MARKER'))")
+
+        assert "kept" in result
+
+
+class TestInterruptCleanup:
+    """验收走查修复：工具执行期间的中断必须回收子进程，不留残留进程与管道。"""
+
+    def test_keyboard_interrupt_kills_child_before_propagating(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events: list[str] = []
+
+        class _StubPopen:
+            pid = 424242
+            killed = False
+
+            def communicate(self, timeout: object = None) -> tuple[str, str]:
+                if not self.killed:
+                    events.append("interrupted")
+                    raise KeyboardInterrupt
+                events.append("reaped")
+                return "", ""
+
+            def poll(self) -> None:
+                return None  # 模拟进程仍在运行
+
+        stub = _StubPopen()
+
+        def fake_kill(process: object) -> None:
+            events.append("killed")
+            stub.killed = True
+
+        monkeypatch.setattr(exec_py.subprocess, "Popen", lambda *_, **__: stub)
+        monkeypatch.setattr(exec_py, "_kill_process_tree", fake_kill)
+
+        with pytest.raises(KeyboardInterrupt):
+            exec_py._run_subprocess([exec_py.sys.executable, "-c", "pass"], 10)
+
+        # 中断路径：先杀树、再有限回收管道，然后原样上抛
+        assert events == ["interrupted", "killed", "reaped"]
 
 
 class TestTruncation:
