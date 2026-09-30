@@ -32,15 +32,22 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
     ToolMessage,
+    messages_from_dict,
+    messages_to_dict,
 )
 from langchain_core.tools import StructuredTool, tool
 
 from cra import config, llm
 from cra.prompts import SYSTEM_PROMPT
-from cra.tools import ERROR_PREFIX, Tool, ToolRegistry, get_default_registry
+from cra.tools import ERROR_PREFIX, EXEC_TOOL_NAME, Tool, ToolRegistry, get_default_registry
 
 MAX_TOOL_ROUNDS = 10  # §3.1：最大工具轮次，超过则强制要求模型给出结论
 _NODES_PER_TOOL_ROUND = 2  # 每个工具轮的图节点数（模型 + 工具）；middleware 引入新节点时须同步
+
+ToolEventCallback = Callable[[str, str], None]  # (工具名, 参数 JSON)
+ToolResultCallback = Callable[[str], None]  # 工具结果文本
+DeltaCallback = Callable[[str], None]  # 最终回答的文本增量
+ExecConfirmCallback = Callable[[dict[str, Any]], bool]  # run_python 执行确认（§7.2）
 
 # ToolNode 对参数校验失败等分支的兜底文案前缀（langgraph prebuilt）；仅用于改写时
 # 剥离——分支判别以 ToolMessage.status=="error" 语义字段为准（见
@@ -50,10 +57,6 @@ _FRAMEWORK_ERROR_PREFIX = "Error:"
 # finish_reason="length" 时附加到最终回答（M1 挂账：长度截断的回答此前被静默当
 # 最终结论，用户无法察觉不完整）；同段文本一并入库，保证"继续"追问时模型可见
 _LENGTH_TRUNCATION_NOTICE = "\n\n⚠ 回答因达到输出长度上限被截断，可能不完整；可让我继续作答。"
-
-ToolEventCallback = Callable[[str, str], None]  # (工具名, 参数 JSON)
-ToolResultCallback = Callable[[str], None]  # 工具结果文本
-DeltaCallback = Callable[[str], None]  # 最终回答的文本增量
 
 
 def _forced_conclusion_directive(max_rounds: int) -> str:
@@ -169,16 +172,24 @@ def _normalize_framework_error(message: BaseMessage) -> BaseMessage:
 
 
 class _ToolCallbacksMiddleware(AgentMiddleware):
-    """工具调用回调与"错误："结构化错误协议（§3.1(3)/§5）。
+    """工具调用回调、执行确认与"错误："结构化错误协议（§3.1(3)/§5/§7.2）。
 
     框架错误分支统一归入"错误："前缀：未知工具名（tool is None，复用注册表
     文案，含可用工具清单）、框架参数校验失败/畸形参数（按 ToolMessage.status
     =="error" 判别后改写前缀）、执行异常（兜底捕获）。on_tool/on_tool_result
     渲染回调在三类分支统一触发，cli 的工具打点与失败展示依赖该协议。
+
+    confirm_exec 为 run_python 的执行前确认回调（§7.2 --ask-exec / /confirm）：
+    返回 False 时以结构化文本拒绝执行并回传模型，REPL 开关由 cli 经属性切换。
     """
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        confirm_exec: ExecConfirmCallback | None = None,
+    ) -> None:
         self._registry = registry
+        self.confirm_exec = confirm_exec
         # 由 Agent.run 按轮设置/清除（REPL 串行执行，一轮最多一个活动回调组；
         # reset() 一并清理，防异常路径挂留引用）
         self.callbacks: tuple[ToolEventCallback | None, ToolResultCallback | None] | None = None
@@ -202,6 +213,20 @@ class _ToolCallbacksMiddleware(AgentMiddleware):
         arguments = json.dumps(call.get("args") or {}, ensure_ascii=False)
         if on_tool is not None:
             on_tool(name, arguments)
+        if (
+            request.tool is not None
+            and name == EXEC_TOOL_NAME
+            and self.confirm_exec is not None
+            and not self.confirm_exec(call.get("args") or {})
+        ):
+            # 用户拒绝执行：结构化回传模型（协议与工具失败一致），不进入 handler
+            response: Any = _error_tool_message(
+                call,
+                ERROR_PREFIX + "用户拒绝了本次代码执行请求；请基于静态分析继续给出结论。",
+            )
+            if on_tool_result is not None:
+                on_tool_result(response.content)
+            return response
         if request.tool is None:
             # 未知工具名：复用注册表的结构化错误文案，模型可自行纠正策略
             response: Any = _error_tool_message(call, self._registry.dispatch(name, arguments))
@@ -295,13 +320,25 @@ class Agent:
         self,
         *,
         model: BaseChatModel | None = None,
+        resolved: config.ResolvedModel | None = None,
         registry: ToolRegistry | None = None,
         max_context_tokens: int | None = None,
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
+        confirm_exec: ExecConfirmCallback | None = None,
     ) -> None:
-        self._chat_model = model if model is not None else llm.create_model()
-        # 展示用模型名（cli 欢迎语）；框架模型对象不向上暴露
-        self.model = getattr(self._chat_model, "model_name", "") or config.get_model()
+        """model 注入仅用于测试（假模型）；真实路径经 resolved（config 层解析结果，
+        §7.4）构建 ChatOpenAI，两者皆缺时走环境变量回退。"""
+        if model is not None:
+            self._chat_model = model
+            self.model = getattr(model, "model_name", "") or config.get_model()
+        elif resolved is not None:
+            self._chat_model = llm.create_model(
+                resolved.model, api_key=resolved.api_key, base_url=resolved.base_url
+            )
+            self.model = resolved.model
+        else:
+            self._chat_model = llm.create_model()
+            self.model = getattr(self._chat_model, "model_name", "") or config.get_model()
         self.registry = registry if registry is not None else get_default_registry()
         self.max_context_tokens = (
             max_context_tokens
@@ -313,22 +350,76 @@ class Agent:
         # 护栏不依赖框架默认值
         self.recursion_limit = _NODES_PER_TOOL_ROUND * max_tool_rounds + 5
         self.messages: list[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT)]
-        self._tool_callbacks = _ToolCallbacksMiddleware(self.registry)
-        self._graph = create_agent(
+        self._tool_callbacks = _ToolCallbacksMiddleware(self.registry, confirm_exec)
+        self._graph = self._build_graph()
+
+    def _build_graph(self) -> Any:
+        """按当前模型客户端与参数组装 agent 图（switch_model 重建时复用同一组
+        middleware 实例，回调与确认开关的状态因此跨切换保留）。"""
+        return create_agent(
             model=self._chat_model,
             tools=[_bridge_tool(self.registry, tool_def) for tool_def in self.registry.definitions()],
             system_prompt=SYSTEM_PROMPT,
             middleware=[
                 self._tool_callbacks,
-                _MaxToolRoundsMiddleware(max_tool_rounds),
+                _MaxToolRoundsMiddleware(self.max_tool_rounds),
                 _ContextTrimMiddleware(self.max_context_tokens),
             ],
         )
+
+    def switch_model(self, resolved: config.ResolvedModel) -> None:
+        """切换模型并重建 agent 图；会话消息正本原样保留（§7.3 /change model）。
+
+        先构建新客户端再赋值：构建失败（如 key 缺失）时旧模型与图保持可用。
+        """
+        new_model = llm.create_model(
+            resolved.model, api_key=resolved.api_key, base_url=resolved.base_url
+        )
+        self._chat_model = new_model
+        self.model = resolved.model
+        self._graph = self._build_graph()
 
     def reset(self) -> None:
         """/clear：重置为仅含系统提示词的初始状态，角色与格式契约保留（§6）。"""
         self.messages = [SystemMessage(content=SYSTEM_PROMPT)]
         self._tool_callbacks.callbacks = None  # 防御性清理：异常路径可能挂留回调引用
+
+    def undo_turn(self) -> bool:
+        """作废最后一轮对话：删除最后一条 user 消息及其后的全部消息（§7.3 /undo）。
+
+        无对话轮次（仅系统提示词）时返回 False，正本不动。
+        """
+        for index in range(len(self.messages) - 1, -1, -1):
+            if isinstance(self.messages[index], HumanMessage):
+                del self.messages[index:]
+                return True
+        return False
+
+    def context_status(self) -> dict[str, Any]:
+        """当前上下文占用与截断阈值（§7.3 /context 的数据源）。
+
+        used 取最近一次响应的真实 usage（含系统提示词，服务端口径）；缺失时
+        以字符估算降级并标注 estimated，供 cli 区分显示。
+        """
+        used = _last_response_usage(self.messages)
+        estimated = used is None
+        if estimated:
+            used = _estimate_tokens(self.messages)
+        return {"used": used, "limit": self.max_context_tokens, "estimated": estimated}
+
+    def dump_session(self) -> list[dict[str, Any]]:
+        """会话消息 → 可 JSON 化的数组（§7.3 /save）；框架序列化留在 agent 层。
+
+        正本开头的系统提示词不入档：/load 恢复时拼当前版本 SYSTEM_PROMPT，
+        避免把旧提示词固化进存档后随会话漂移。
+        """
+        dialogue = self.messages[1:] if self.messages else []
+        return messages_to_dict(dialogue)
+
+    def load_session(self, data: list[dict[str, Any]]) -> None:
+        """从 dump_session 的数据整体恢复会话（§7.3 /load），系统提示词取当前版本。"""
+        restored = messages_from_dict(data)
+        self.messages = [SystemMessage(content=SYSTEM_PROMPT), *restored]
 
     def run(
         self,

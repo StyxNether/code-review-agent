@@ -19,7 +19,7 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
-from cra import llm
+from cra import config, llm
 from cra.agent import (
     MAX_TOOL_ROUNDS,
     Agent,
@@ -799,3 +799,233 @@ class TestToolBridging:
             {"type": "tool_call", "args": {"text": "直呼"}, "id": "cx", "name": "echo"}
         )
         assert result.content == "ECHO:直呼"
+
+
+# 测试占位值(明显假值,非真实凭据);以变量构造避免密钥扫描对字面量的误报
+_PLACEHOLDER_KEY = "placeholder-a"
+_PLACEHOLDER_URL = "https://probe.example.com"
+
+
+def _exec_registry(calls: list[str]) -> ToolRegistry:
+    """带 run_python 工具的测试注册表:handler 记录被调用(供确认拦截断言)。"""
+
+    def run(code: str) -> str:
+        calls.append(code)
+        return "ran"
+
+    registry = ToolRegistry()
+    registry.register(
+        name="run_python",
+        description="执行",
+        parameters={
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"],
+        },
+        handler=run,
+    )
+    return registry
+
+
+class TestSwitchModel:
+    """§7.3 /change model 的底层能力:重建图、上下文正本保留。"""
+
+    def _patch_create_model(
+        self, monkeypatch: pytest.MonkeyPatch, new_fake: ScriptedChatModel
+    ) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+
+        def fake_create_model(
+            model_name: str, *, api_key: str | None = None, base_url: str | None = None
+        ) -> ScriptedChatModel:
+            captured.update(model_name=model_name, api_key=api_key, base_url=base_url)
+            return new_fake
+
+        monkeypatch.setattr(llm, "create_model", fake_create_model)
+        return captured
+
+    def test_switch_keeps_messages_and_updates_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent, _ = make_agent([text_response("第一轮"), text_response("切换后")])
+        agent.run("第一问")
+        before = list(agent.messages)
+
+        new_fake = ScriptedChatModel(responses=[text_response("切换后")])
+        captured = self._patch_create_model(monkeypatch, new_fake)
+        resolved = config.ResolvedModel(
+            model="new-model", base_url=_PLACEHOLDER_URL, api_key=_PLACEHOLDER_KEY, provider="prov"
+        )
+        agent.switch_model(resolved)
+        agent.run("切换后再问")
+
+        assert agent.messages[: len(before)] == before  # 正本保留,切换后新消息追加在后
+        assert agent.model == "new-model"
+        assert captured == {
+            "model_name": "new-model",
+            "api_key": _PLACEHOLDER_KEY,
+            "base_url": _PLACEHOLDER_URL,
+        }
+        assert new_fake.requests  # 切换后的 run 走新模型
+
+    def test_switch_failure_keeps_old_model_usable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """构建失败(如 key 缺失)时旧模型与图保持可用(先构建后赋值)。"""
+        agent, _ = make_agent([text_response("第一轮"), text_response("旧模型兜底")])
+        agent.run("第一问")
+
+        def broken_create_model(*_args: Any, **_kwargs: Any) -> ScriptedChatModel:
+            raise llm.LLMError("key 缺失")
+
+        monkeypatch.setattr(llm, "create_model", broken_create_model)
+        resolved = config.ResolvedModel(
+            model="x", base_url=_PLACEHOLDER_URL, api_key=None, provider=None
+        )
+        with pytest.raises(llm.LLMError):
+            agent.switch_model(resolved)
+
+        monkeypatch.undo()
+        agent.run("再问")  # 旧模型仍可对话
+        assert agent.model != "x"
+
+
+class TestExecConfirm:
+    """§7.2 --ask-exec / /confirm 的底层钩子:拒绝时结构化回传模型、不执行。"""
+
+    def test_rejected_exec_not_run_and_reported(self) -> None:
+        calls: list[str] = []
+        fake = ScriptedChatModel(
+            responses=[
+                tool_response("c1", "run_python", {"code": "x"}),
+                text_response("收到,仅静态分析。"),
+            ]
+        )
+        agent = Agent(
+            model=fake,
+            registry=_exec_registry(calls),
+            confirm_exec=lambda _args: False,
+        )
+
+        agent.run("帮我执行")
+
+        assert calls == []  # 未执行
+        tool_messages = [m for m in fake.requests[1] if isinstance(m, ToolMessage)]
+        assert tool_messages and tool_messages[0].content.startswith("错误：")
+        assert "拒绝" in tool_messages[0].content
+
+    def test_confirmed_exec_runs(self) -> None:
+        calls: list[str] = []
+        agent = Agent(
+            model=ScriptedChatModel(
+                responses=[
+                    tool_response("c1", "run_python", {"code": "x"}),
+                    text_response("结论。"),
+                ]
+            ),
+            registry=_exec_registry(calls),
+            confirm_exec=lambda _args: True,
+        )
+
+        agent.run("帮我执行")
+
+        assert calls == ["x"]
+
+    def test_confirm_none_runs_directly(self) -> None:
+        """默认自动执行(§7.2:--ask-exec 缺省)。"""
+        calls: list[str] = []
+        agent = Agent(
+            model=ScriptedChatModel(
+                responses=[
+                    tool_response("c1", "run_python", {"code": "x"}),
+                    text_response("结论。"),
+                ]
+            ),
+            registry=_exec_registry(calls),
+        )
+
+        agent.run("帮我执行")
+
+        assert calls == ["x"]
+
+
+class TestUndoAndContext:
+    """§7.3 /undo 与 /context 的底层能力。"""
+
+    def test_undo_removes_last_round(self) -> None:
+        agent, _ = make_agent([text_response("答一"), text_response("答二")])
+        agent.run("第一问")
+        agent.run("第二问")
+
+        assert agent.undo_turn() is True
+        assert shape(agent.messages) == [
+            ("SystemMessage", SYSTEM_PROMPT),
+            ("HumanMessage", "第一问"),
+            ("AIMessage", "答一"),
+        ]
+
+    def test_undo_without_turns_returns_false(self) -> None:
+        agent, _ = make_agent([])
+
+        assert agent.undo_turn() is False
+        assert agent.messages == [SystemMessage(content=SYSTEM_PROMPT)]
+
+    def test_context_uses_real_usage(self) -> None:
+        agent, _ = make_agent([text_response("答", total_tokens=1234)], max_context_tokens=5000)
+        agent.run("问")
+
+        status = agent.context_status()
+
+        assert status == {"used": 1234, "limit": 5000, "estimated": False}
+
+    def test_context_estimates_without_usage(self) -> None:
+        """usage 缺失(服务端未回)时字符估算降级并标注(§3.1 安全降级)。"""
+        agent, _ = make_agent([text_response("答", total_tokens=None)], max_context_tokens=5000)
+        agent.run("问")
+
+        status = agent.context_status()
+
+        assert status["estimated"] is True
+        assert status["used"] > 0
+        assert status["limit"] == 5000
+
+
+class TestSessionPersistence:
+    """§7.3 /save /load 的底层能力:框架序列化留在 agent 层、系统提示词不入档。"""
+
+    def test_dump_skips_system_prompt(self) -> None:
+        agent, _ = make_agent([text_response("答")])
+        agent.run("问")
+
+        data = agent.dump_session()
+
+        assert len(data) == 2
+        assert data[0]["type"] == "human"
+
+    def test_dump_load_roundtrip_preserves_tool_round(self) -> None:
+        agent, _ = make_agent([])
+        agent.messages.extend(make_round("审查 x", answer="结论"))
+
+        data = agent.dump_session()
+        restored_agent, _ = make_agent([])
+        restored_agent.load_session(data)
+
+        expected = make_round("审查 x", answer="结论")
+        assert shape(restored_agent.messages) == shape(
+            [SystemMessage(content=SYSTEM_PROMPT), *expected]
+        )
+        original_ai = next(m for m in expected if isinstance(m, AIMessage) and m.tool_calls)
+        restored_ai = next(
+            m for m in restored_agent.messages if isinstance(m, AIMessage) and m.tool_calls
+        )
+        assert restored_ai.tool_calls == original_ai.tool_calls
+
+    def test_load_then_run_continues_normally(self) -> None:
+        """恢复后的会话可继续对话(请求注入完整历史)。"""
+        agent, _ = make_agent([text_response("答一")])
+        agent.run("第一问")
+        data = agent.dump_session()
+
+        restored_agent, fake = make_agent([text_response("答二")])
+        restored_agent.load_session(data)
+        restored_agent.run("第二问")
+
+        # 模型请求序列以框架注入的系统消息开头,fed 历史随后
+        assert fake.requests[-1][1].content == "第一问"  # 历史一并注入
+        assert fake.requests[-1][-1].content == "第二问"

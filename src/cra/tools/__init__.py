@@ -18,6 +18,9 @@ Handler = Callable[..., str]
 # fs.py 的错误文本也遵循该前缀约定，改前缀需两处同步
 ERROR_PREFIX = "错误："
 
+# 代码执行工具名：agent 层的执行确认钩子（--ask-exec / /confirm）按名匹配
+EXEC_TOOL_NAME = "run_python"
+
 
 @dataclass(frozen=True)
 class Tool:
@@ -125,7 +128,7 @@ def _build_default_registry() -> ToolRegistry:
         handler=fs.read_file,
     )
     registry.register(
-        name="run_python",
+        name=EXEC_TOOL_NAME,
         description=(
             "运行 Python 代码并返回退出码与 stdout/stderr（各截断至 2000 字符）。"
             "code（内联代码）与 path（.py 文件路径，相对当前工作目录，非 .py 文件"
