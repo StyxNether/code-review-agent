@@ -40,13 +40,12 @@ from cra.prompts import SYSTEM_PROMPT
 from cra.tools import ERROR_PREFIX, Tool, ToolRegistry, get_default_registry
 
 MAX_TOOL_ROUNDS = 10  # §3.1：最大工具轮次，超过则强制要求模型给出结论
+_NODES_PER_TOOL_ROUND = 2  # 每个工具轮的图节点数（模型 + 工具）；middleware 引入新节点时须同步
 
-# ToolNode 对参数校验失败等分支的兜底文案前缀（langgraph prebuilt）；统一改写为
-# "错误："前缀后回传模型（§3.1(3)：协议是行为锁定点，框架文案不得直通模型）
+# ToolNode 对参数校验失败等分支的兜底文案前缀（langgraph prebuilt）；仅用于改写时
+# 剥离——分支判别以 ToolMessage.status=="error" 语义字段为准（见
+# _normalize_framework_error），框架升版换文案不影响协议
 _FRAMEWORK_ERROR_PREFIX = "Error:"
-# 工厂对"畸形/截断 JSON 参数"在模型请求侧合成的提示标记（不经工具层，绕过
-# wrap_tool_call）：同样归一为"错误："前缀
-_FRAMEWORK_MALFORMED_MARK = "could not be executed"
 
 # finish_reason="length" 时附加到最终回答（M1 挂账：长度截断的回答此前被静默当
 # 最终结论，用户无法察觉不完整）；同段文本一并入库，保证"继续"追问时模型可见
@@ -79,13 +78,18 @@ def _drop_oldest_round(messages: list[BaseMessage]) -> list[BaseMessage]:
 
 
 def _estimate_tokens(messages: Sequence[BaseMessage]) -> int:
-    """字符数 // 2 的粗估（中英混合折中）。仅决定额外丢弃量；触发以真实 usage 为准。"""
+    """字符数粗估（中英混合折中 × 1.2 安全余量）。
+
+    中英混合按 字符数//2 折中：英文占比高时估算偏高（多丢——安全方向），中文
+    占比高时估算偏低（少丢、可能连续超限）。取 0.6 系数（=//2 的 1.2 倍）向
+    "宁多丢"倾斜。仅决定额外丢弃量；触发以真实 usage 为准。
+    """
     total_chars = 0
     for message in messages:
         total_chars += len(message.text)
         for call in getattr(message, "tool_calls", None) or []:
             total_chars += len(call["name"]) + len(str(call.get("args") or {}))
-    return total_chars // 2
+    return int(total_chars * 0.6)
 
 
 def truncate_rounds(
@@ -137,43 +141,59 @@ def _last_response_usage(messages: Sequence[BaseMessage]) -> int | None:
 def _error_tool_message(call: dict[str, Any], content: str) -> ToolMessage:
     """按 tool_call 构造错误结果消息（id/name 与调用一一对应）。"""
     return ToolMessage(
-        content=content, name=str(call.get("name", "")), tool_call_id=str(call.get("id", ""))
+        content=content,
+        name=str(call.get("name") or ""),
+        tool_call_id=str(call.get("id") or ""),
     )
+
+
+def _normalize_framework_error(message: BaseMessage) -> BaseMessage:
+    """框架生成的错误 ToolMessage（status="error"）统一为"错误："前缀回传模型。
+
+    以 status 语义字段判别而非文案前缀：工具的正常输出（status="success"）即使
+    恰好以 "Error:" 开头也不被改写（验收走查实证的误伤缺陷）；框架升版更换文案
+    时该门禁依旧成立。"错误："前缀已存在的消息（历史轮次经 wrap_tool_call 改写
+    过）原样返回，避免重复叠加。
+    """
+    if (
+        not isinstance(message, ToolMessage)
+        or message.status != "error"
+        or not isinstance(message.content, str)
+        or message.content.startswith(ERROR_PREFIX)
+    ):
+        return message
+    content = message.content
+    if content.startswith(_FRAMEWORK_ERROR_PREFIX):
+        content = content[len(_FRAMEWORK_ERROR_PREFIX) :].lstrip()
+    return message.model_copy(update={"content": ERROR_PREFIX + content})
 
 
 class _ToolCallbacksMiddleware(AgentMiddleware):
     """工具调用回调与"错误："结构化错误协议（§3.1(3)/§5）。
 
-    框架三类错误分支统一归入"错误："前缀：未知工具名（tool is None，复用注册表
-    文案，含可用工具清单）、框架参数校验失败（ToolNode 以"Error: …"兜底，改写
-    前缀）、执行异常（兜底捕获）。on_tool/on_tool_result 渲染回调在此统一触发，
-    cli 的工具打点与失败展示依赖该协议。
+    框架错误分支统一归入"错误："前缀：未知工具名（tool is None，复用注册表
+    文案，含可用工具清单）、框架参数校验失败/畸形参数（按 ToolMessage.status
+    =="error" 判别后改写前缀）、执行异常（兜底捕获）。on_tool/on_tool_result
+    渲染回调在三类分支统一触发，cli 的工具打点与失败展示依赖该协议。
     """
 
     def __init__(self, registry: ToolRegistry) -> None:
         self._registry = registry
-        # 由 Agent.run 按轮设置/清除（REPL 串行执行，一轮最多一个活动回调组）
+        # 由 Agent.run 按轮设置/清除（REPL 串行执行，一轮最多一个活动回调组；
+        # reset() 一并清理，防异常路径挂留引用）
         self.callbacks: tuple[ToolEventCallback | None, ToolResultCallback | None] | None = None
 
     def wrap_model_call(
         self, request: ModelRequest, handler: Callable[[ModelRequest], Any]
     ) -> Any:
-        """模型通道错误前缀归一（框架对畸形参数的合成提示只在请求侧出现）。"""
+        """模型通道错误前缀归一：框架合成的错误提示（如畸形 JSON 参数）不经
+        工具层、绕过 wrap_tool_call，在请求侧统一改写。"""
         if not any(
-            isinstance(message, ToolMessage)
-            and isinstance(message.content, str)
-            and _FRAMEWORK_MALFORMED_MARK in message.content
+            isinstance(message, ToolMessage) and message.status == "error"
             for message in request.messages
         ):
             return handler(request)
-        normalized = [
-            message.model_copy(update={"content": ERROR_PREFIX + message.content})
-            if isinstance(message, ToolMessage)
-            and isinstance(message.content, str)
-            and _FRAMEWORK_MALFORMED_MARK in message.content
-            else message
-            for message in request.messages
-        ]
+        normalized = [_normalize_framework_error(message) for message in request.messages]
         return handler(request.override(messages=normalized))
 
     def wrap_tool_call(
@@ -181,30 +201,28 @@ class _ToolCallbacksMiddleware(AgentMiddleware):
     ) -> Any:
         on_tool, on_tool_result = self.callbacks or (None, None)
         call = request.tool_call
-        name = str(call.get("name", ""))
+        name = str(call.get("name") or "")
         arguments = json.dumps(call.get("args") or {}, ensure_ascii=False)
         if on_tool is not None:
             on_tool(name, arguments)
         if request.tool is None:
             # 未知工具名：复用注册表的结构化错误文案，模型可自行纠正策略
-            result = self._registry.dispatch(name, arguments)
-            if on_tool_result is not None:
-                on_tool_result(result)
-            return _error_tool_message(call, result)
-        try:
-            response = handler(request)
-        except Exception as exc:  # noqa: BLE001 — 设计要求：工具异常必须全部结构化回传模型（§5）
-            result = ERROR_PREFIX + f"工具 '{name}' 执行失败：{exc}"
-            if on_tool_result is not None:
-                on_tool_result(result)
-            return _error_tool_message(call, result)
-        result = response.content if isinstance(response, ToolMessage) else ""
-        if isinstance(result, str) and result.startswith(_FRAMEWORK_ERROR_PREFIX):
-            result = ERROR_PREFIX + result[len(_FRAMEWORK_ERROR_PREFIX) :].lstrip()
-            if isinstance(response, ToolMessage):
-                response = response.model_copy(update={"content": result})
-        if on_tool_result is not None and isinstance(result, str) and result:
-            on_tool_result(result)
+            response: Any = _error_tool_message(call, self._registry.dispatch(name, arguments))
+        else:
+            try:
+                response = handler(request)
+            except Exception as exc:  # noqa: BLE001 — 设计要求：工具异常必须全部结构化回传模型（§5）
+                response = _error_tool_message(call, ERROR_PREFIX + f"工具 '{name}' 执行失败：{exc}")
+            else:
+                if isinstance(response, ToolMessage):
+                    response = _normalize_framework_error(response)
+        result = (
+            response.content
+            if isinstance(response, ToolMessage) and isinstance(response.content, str)
+            else ""
+        )
+        if on_tool_result is not None:
+            on_tool_result(result)  # 三分支统一触发（空串也回调），协议对调用方一致
         return response
 
 
@@ -212,8 +230,9 @@ class _MaxToolRoundsMiddleware(AgentMiddleware):
     """最大工具轮次（§3.1(4)）：达限后对下一次模型调用去工具并注入收尾指令。
 
     官方 ModelCallLimit/ToolCallLimit 的 exit 语义不等价（不注入、不去工具），不采用。
-    计数只覆盖本轮（见 _rounds_this_run），历史轮次不累积；注入的指令只进本次
-    请求，不落入正本（D14：会话消息正本只含真实对话）。
+    计数只覆盖本轮（见 _rounds_this_run），历史轮次不累积；收尾指令经 system
+    通道注入（不产生伪造 user 消息）——请求视图的轮次边界只认真实 user 消息，
+    截断不会把孤立指令当作"最后一个完整轮次"而丢弃全部上下文；指令不落正本（D14）。
     """
 
     def __init__(self, max_rounds: int) -> None:
@@ -222,14 +241,21 @@ class _MaxToolRoundsMiddleware(AgentMiddleware):
     def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Any]) -> Any:
         if _rounds_this_run(request.state["messages"]) < self.max_rounds:
             return handler(request)
-        request = request.override(
-            tools=[],
-            tool_choice=None,
-            messages=[
-                *request.messages,
-                HumanMessage(content=_forced_conclusion_directive(self.max_rounds)),
-            ],
-        )
+        directive = _forced_conclusion_directive(self.max_rounds)
+        if request.system_message is not None:
+            request = request.override(
+                tools=[],
+                tool_choice=None,
+                system_message=SystemMessage(
+                    content=f"{request.system_message.content}\n\n{directive}"
+                ),
+            )
+        else:
+            request = request.override(
+                tools=[],
+                tool_choice=None,
+                messages=[*request.messages, HumanMessage(content=directive)],
+            )
         return handler(request)
 
 
@@ -286,8 +312,9 @@ class Agent:
             else config.get_max_context_tokens()
         )
         self.max_tool_rounds = max_tool_rounds
-        # 每轮至多 2 个图节点（模型/工具）× 轮次 + 收尾调用 + 余量；护栏不依赖框架默认值
-        self.recursion_limit = 2 * max_tool_rounds + 5
+        # 每轮 _NODES_PER_TOOL_ROUND 个图节点（模型/工具）× 轮次 + 收尾调用 + 余量；
+        # 护栏不依赖框架默认值
+        self.recursion_limit = _NODES_PER_TOOL_ROUND * max_tool_rounds + 5
         self.messages: list[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT)]
         self._tool_callbacks = _ToolCallbacksMiddleware(self.registry)
         self._graph = create_agent(
@@ -304,6 +331,7 @@ class Agent:
     def reset(self) -> None:
         """/clear：重置为仅含系统提示词的初始状态，角色与格式契约保留（§6）。"""
         self.messages = [SystemMessage(content=SYSTEM_PROMPT)]
+        self._tool_callbacks.callbacks = None  # 防御性清理：异常路径可能挂留回调引用
 
     def run(
         self,
@@ -321,6 +349,7 @@ class Agent:
         原样上抛。
         """
         self._tool_callbacks.callbacks = (on_tool, on_tool_result)
+        prefix_length = len(self.messages)  # 本轮开始前的正本长度（含系统提示词）
         self.messages.append(HumanMessage(content=user_input))
         fed = self.messages[1:]  # 系统提示词经 system 通道注入，不入图状态
         fed_length = len(fed)
@@ -341,8 +370,9 @@ class Agent:
             return text
         except BaseException:
             # §5：任何异常（中断/请求失败）都回滚本轮再上抛。图状态是一次性请求
-            # 视图，运行期间正本只有"本轮起始 user 消息"一处变更，删除即可。
-            del self.messages[-1]
+            # 视图，正本在本轮只有"追加 user 消息"与"成功后追加新消息"两处变更；
+            # 按前缀长度截断，覆盖成功收尾之后仍抛异常的窄窗口（契约不依赖窗口概率）
+            del self.messages[prefix_length:]
             raise
         finally:
             self._tool_callbacks.callbacks = None

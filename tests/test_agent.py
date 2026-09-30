@@ -306,6 +306,55 @@ class TestRunBasics:
 
         assert results and results[0].startswith("错误")
 
+    def test_tool_output_starting_with_error_not_rewritten(self) -> None:
+        """回归（验收走查）：工具的正常输出恰以 'Error:' 开头时不被误改写。
+
+        判别依据是 ToolMessage.status 语义字段（正常输出 success），不是文案前缀。
+        """
+        registry = make_registry()
+        registry.register(
+            name="errish",
+            description="返回以 Error: 开头的正常输出",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: "Error: 这只是工具的正常输出",
+        )
+        agent, fake = make_agent(
+            [tool_response("c1", "errish", {}), text_response("好")], registry=registry
+        )
+        results: list[str] = []
+
+        agent.run("x", on_tool_result=results.append)
+
+        tool_messages = [m for m in fake.requests[1] if isinstance(m, ToolMessage)]
+        assert tool_messages[0].content == "Error: 这只是工具的正常输出"  # 原样回传模型
+        assert results == ["Error: 这只是工具的正常输出"]  # cli 亦按正常结果展示
+
+    def test_empty_tool_result_still_fires_callback(self) -> None:
+        """回归（验收走查）：三分支回调协议一致——空结果也触发 on_tool_result。"""
+        registry = make_registry()
+        registry.register(
+            name="empty",
+            description="返回空串",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: "",
+        )
+        agent, _ = make_agent([tool_response("c1", "empty", {}), text_response("好")], registry=registry)
+        results: list[str] = []
+
+        agent.run("x", on_tool_result=results.append)
+
+        assert results == [""]
+
+    def test_reset_clears_pending_callbacks(self) -> None:
+        agent, _ = make_agent([text_response("答")])
+        agent.run("x", on_tool=lambda name, args: None)
+        assert agent._tool_callbacks.callbacks is None  # 正常返回即清
+        agent._tool_callbacks.callbacks = (lambda *a: None, lambda *a: None)  # 模拟异常挂留
+
+        agent.reset()
+
+        assert agent._tool_callbacks.callbacks is None
+
     def test_delta_callback_fires_for_final_answer(self) -> None:
         deltas: list[str] = []
         agent, _ = make_agent([text_response("流式回答")], streaming=True)
@@ -382,7 +431,7 @@ class TestMaxToolRounds:
         assert_rounds_atomic(agent.messages)
 
     def test_forced_call_has_no_tools_and_injected_directive(self) -> None:
-        """达限机制锁定：下一次模型调用去工具 + 注入收尾指令（§3.1(4)）。"""
+        """达限机制锁定：下一次模型调用去工具 + 收尾指令经 system 通道注入（§3.1(4)）。"""
         script = [tool_response(f"c{i}", "echo", {"text": str(i)}) for i in range(MAX_TOOL_ROUNDS)]
         script.append(text_response("最终结论"))
         agent, fake = make_agent(script)
@@ -391,8 +440,13 @@ class TestMaxToolRounds:
 
         assert fake.bound_tools[-1] == []  # 去工具
         assert fake.bound_tools[:-1] and all(fake.bound_tools[:-1])  # 其余调用都带工具
-        directive = [m for m in fake.requests[-1] if isinstance(m, HumanMessage)][-1]
-        assert "上限" in directive.content
+        system_message = fake.requests[-1][0]
+        assert isinstance(system_message, SystemMessage)
+        assert system_message.content.startswith(SYSTEM_PROMPT)  # 原系统提示词保留在前
+        assert "上限" in system_message.content  # 收尾指令追加于 system 通道
+        # 请求中除本轮真实输入外无伪造 user 消息——截断的轮次边界不被指令污染
+        humans = [m for m in fake.requests[-1] if isinstance(m, HumanMessage)]
+        assert [m.content for m in humans] == ["x"]
 
     def test_directive_not_persisted_in_master(self) -> None:
         """收尾指令只在请求侧（D14）：正本不出现注入的 user 消息。"""
@@ -485,13 +539,16 @@ class TestTruncateRounds:
         assert result[0].content == "u2"  # 超过 1 token 也按轮次整体丢最旧一轮
 
     def test_estimate_boundary_stops_dropping(self) -> None:
-        """边界：估算降到阈值以内即停（两轮各恰 1000 字符 ≈ 500 tokens，阈值 500）。"""
+        """边界：估算降到阈值以内即停（两轮各恰 1000 字符 ≈ 600 估算 tokens，阈值 600）。
+
+        估算含 1.2 倍安全余量（1000 字符 × 0.6）；丢一轮后估算 == 阈值，不再继续丢。
+        """
         messages = [
             *make_round("u" * 996, with_tools=False),
             *make_round("v" * 996, with_tools=False),
         ]
 
-        result = truncate_rounds(messages, usage_total_tokens=100_000, max_tokens=500)
+        result = truncate_rounds(messages, usage_total_tokens=100_000, max_tokens=600)
 
         assert sum(isinstance(m, HumanMessage) for m in result) == 1
         assert result[-1].content == "done"
