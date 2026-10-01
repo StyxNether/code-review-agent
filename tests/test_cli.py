@@ -4,12 +4,13 @@
 import json
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 from rich.console import Console
 
-from cra import cli
+from cra import cli, config, sessions
 from cra.cli import (
     _build_parser,
     _in_fence,
@@ -30,11 +31,40 @@ class TestParser:
 
         assert args.command == "chat"
 
-    def test_missing_subcommand_exits_with_usage(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with pytest.raises(SystemExit):
-            _build_parser().parse_args([])
+    def test_missing_subcommand_yields_none_for_bare_entry(self) -> None:
+        """M7 裸入口：子命令可选化，缺省 command=None 由 main 进入 chat REPL（§7.1）。"""
+        args = _build_parser().parse_args([])
 
-        assert "chat" in capsys.readouterr().err
+        assert args.command is None
+
+    def test_bare_entry_defaults_match_chat_subcommand(self) -> None:
+        """自审锁定：chat 子解析器的参数缺省值必须与 main 裸入口的 getattr 缺省一致，
+        否则裸 cra 与 cra chat 行为静默分叉（main 注释所指的不变量）。"""
+        from cra.agent import MAX_TOOL_ROUNDS
+
+        chat = _build_parser().parse_args(["chat"])
+
+        assert chat.model is None
+        assert chat.provider is None
+        assert chat.no_stream is False
+        assert chat.max_rounds == MAX_TOOL_ROUNDS
+        assert chat.ask_exec is False
+
+    def test_missing_subcommand_enters_repl(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """M7 语义反转：缺失子命令原期望报错退出，现期望默认进入 REPL（mock input 验证）。"""
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        monkeypatch.setattr(sys, "argv", ["cra"])
+        inputs = iter(["exit"])
+        monkeypatch.setattr("builtins.input", lambda *a: next(inputs))
+
+        cli.main()  # 不抛 SystemExit 即通过：裸入口进入 REPL 并正常退出
+
+        out = capsys.readouterr().out
+        assert "已就绪" in out
+        assert "再见" in out
 
     def test_unknown_subcommand_exits(self) -> None:
         with pytest.raises(SystemExit):
@@ -897,3 +927,329 @@ class TestCliArgs:
     def test_config_subcommand_parses(self) -> None:
         assert _build_parser().parse_args(["config"]).command == "config"
         assert _build_parser().parse_args(["config", "test"]).config_action == "test"
+
+
+# ---- M7:裸入口、/setting 菜单、/exit、会话自动保留与 /resume(§7.1/§7.3)----
+
+
+class _EmptyDumpAgent(_FakeAgent):
+    """dump_session 为空的假 Agent:新开即退的会话(自动保留跳过空存档)。"""
+
+    def dump_session(self) -> list[dict[str, Any]]:
+        return []
+
+
+def _feed(inputs: list[str]) -> Any:
+    """input 打桩:按序返回;清单耗尽后抛 EOFError(模拟管道结束/ Ctrl+D)。"""
+    iterator = iter(inputs)
+
+    def fake_input(*_args: str) -> str:
+        try:
+            return next(iterator)
+        except StopIteration:
+            raise EOFError
+
+    return fake_input
+
+
+def _seed_last(home: Path, data: Any) -> None:
+    """预置 _last.json 存档(合法消息数组或任意坏内容)。"""
+    path = home / ".cra" / "sessions" / "_last.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(data if isinstance(data, str) else json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+class TestExitAndSetting:
+    """/exit 等价退出与 /setting 菜单分发（M7）：菜单复用既有命令实现（mock 验证映射）。"""
+
+    def _repl(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        inputs: list[str],
+    ) -> str:
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        monkeypatch.setattr("builtins.input", _feed(inputs))
+        cli._run_chat()
+        return capsys.readouterr().out
+
+    def test_slash_exit_ends_repl(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """/exit 与 exit 等价退出（§7.3 M7）。"""
+        out = self._repl(monkeypatch, capsys, ["/exit"])
+
+        assert "再见" in out
+
+    def test_setting_menu_dispatches_to_existing_implementations(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """菜单 1–5 逐项分发到既有命令函数（mock 记录映射），操作后回到菜单，0 返回对话。"""
+        calls: list[Any] = []
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        monkeypatch.setattr(cli, "_cmd_change_model", lambda state: calls.append("model"))
+        monkeypatch.setattr(
+            cli, "_config_interactive_session", lambda console, data: calls.append("config")
+        )
+        monkeypatch.setattr(cli, "_cmd_save", lambda state, name: calls.append(("save", name)))
+        monkeypatch.setattr(cli, "_cmd_load", lambda state, name: calls.append(("load", name)))
+        monkeypatch.setattr(cli, "_cmd_confirm", lambda state, arg: calls.append(("confirm", arg)))
+        monkeypatch.setattr(
+            "builtins.input",
+            _feed(["/setting", "1", "2", "3", "s1", "4", "s2", "5", "on", "0", "exit"]),
+        )
+
+        cli._run_chat()
+        out = capsys.readouterr().out
+
+        assert calls == ["model", "config", ("save", "s1"), ("load", "s2"), ("confirm", "on")]
+        # 初始菜单 + 每个操作后各回一次菜单（5 项操作 → 共 6 次显示）
+        assert out.count("设置菜单") == 6
+
+    def test_setting_empty_choice_returns_to_repl(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """回车（空选择）返回对话，REPL 主循环继续。"""
+        out = self._repl(monkeypatch, capsys, ["/setting", "", "exit"])
+
+        assert out.count("设置菜单") == 1
+        assert "再见" in out
+
+    def test_setting_invalid_choice_stays_in_menu(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """无效选择提示后回到菜单（嵌套循环：任何失败/取消回到菜单）。"""
+        out = self._repl(monkeypatch, capsys, ["/setting", "9", "0", "exit"])
+
+        assert "无效选择" in out
+        assert out.count("设置菜单") == 2
+
+    def test_setting_config_corruption_returns_to_menu(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """会话进行中配置损坏（ConfigError）：菜单内降级为回菜单（可读提示），会话存活。
+
+        patch _config_interactive_session 抛 ConfigError——启动阶段的 load_raw
+        不受影响，模拟"REPL 打开后配置才损坏"的真实场景。
+        """
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+
+        def broken(_console: Any, _data: dict[str, Any]) -> None:
+            raise config.ConfigError("models.json 不是 JSON 对象")
+
+        monkeypatch.setattr(cli, "_config_interactive_session", broken)
+        monkeypatch.setattr("builtins.input", _feed(["/setting", "2", "0", "exit"]))
+
+        cli._run_chat()
+        out = capsys.readouterr().out
+
+        assert "配置文件损坏" in out
+        assert "回到设置菜单" in out
+        assert "再见" in out  # 菜单退出后 REPL 存活至正常退出
+
+    def test_setting_save_uses_real_save(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        """菜单 3) 保存会话走真实 /save 路径：输入名称后写盘。"""
+        out = self._repl(monkeypatch, capsys, ["/setting", "3", "menu-save", "0", "exit"])
+
+        assert (home_dir / ".cra" / "sessions" / "menu-save.json").exists()
+        assert "会话已保存" in out
+
+    def test_setting_load_missing_file_returns_to_menu(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """菜单 4) 加载不存在的会话：报错后回到菜单（不终止菜单循环）。"""
+        out = self._repl(monkeypatch, capsys, ["/setting", "4", "ghost", "0", "exit"])
+
+        assert "会话文件不存在" in out
+        assert out.count("设置菜单") == 2
+
+    def test_setting_confirm_toggle(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """菜单 5) 执行确认开关复用 /confirm：状态行显示开启（断言精确文案，菜单回显不含状态）。"""
+        out = self._repl(monkeypatch, capsys, ["/setting", "5", "on", "0", "exit"])
+
+        assert "run_python 执行确认：开" in out
+
+    def test_setting_eof_returns_to_repl_then_exits(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """菜单内 EOF 经 _ask 归一为返回对话，REPL 主循环随后同样 EOF 优雅退出。"""
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        monkeypatch.setattr("builtins.input", _feed(["/setting"]))
+
+        cli._run_chat()  # 不抛异常即通过
+
+        out = capsys.readouterr().out
+        assert "设置菜单" in out
+        assert "再见" in out
+
+
+class TestSessionAutosave:
+    """会话自动保留与 /resume（§7.3 M7）：退出写 _last、启动提示、/resume 恢复。"""
+
+    @staticmethod
+    def _last_path(home_dir: Path) -> Path:
+        return home_dir / ".cra" / "sessions" / "_last.json"
+
+    def _repl(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        inputs: list[str],
+        agent_cls: Any = _FakeAgent,
+    ) -> str:
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", agent_cls)
+        monkeypatch.setattr("builtins.input", _feed(inputs))
+        cli._run_chat()
+        return capsys.readouterr().out
+
+    def _run_and_read(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+        inputs: list[str],
+        agent_cls: Any = _FakeAgent,
+    ) -> str:
+        """跑一轮 REPL 并断言自动保留提示，返回 _last.json 内容。"""
+        out = self._repl(monkeypatch, capsys, inputs, agent_cls)
+        assert "会话已自动保留" in out
+        return self._last_path(home_dir).read_text(encoding="utf-8")
+
+    def test_exit_autosaves_last_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        data = json.loads(
+            self._run_and_read(monkeypatch, capsys, home_dir, ["审查 x", "exit"])
+        )
+        assert len(data) == 1  # _FakeAgent.dump_session 的单条对话消息
+
+    def test_eof_autosaves_last_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        """EOF 退出同样触发自动保留（§7.3：任何方式退出）。"""
+        data = json.loads(
+            self._run_and_read(monkeypatch, capsys, home_dir, ["审查 x"])
+        )
+        assert len(data) == 1
+
+    def test_slash_exit_autosaves_last_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        data = json.loads(
+            self._run_and_read(monkeypatch, capsys, home_dir, ["审查 x", "/exit"])
+        )
+        assert len(data) == 1
+
+    def test_empty_session_skips_autosave_keeps_previous(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        """空会话不覆盖既有存档：新开即退不该丢掉上一次的自动保留。"""
+        previous = [{"type": "human", "data": {"content": "上一会话"}}]
+        _seed_last(home_dir, previous)
+
+        out = self._repl(monkeypatch, capsys, ["exit"], agent_cls=_EmptyDumpAgent)
+
+        assert "会话已自动保留" not in out
+        assert json.loads(self._last_path(home_dir).read_text(encoding="utf-8")) == previous
+
+    def test_autosave_failure_does_not_block_exit(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """写盘失败只提示、不阻断退出（§7.3：失败仅提示不阻断退出）。"""
+
+        def boom(_path: Any, _data: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cli.sessions, "save_session", boom)
+
+        out = self._repl(monkeypatch, capsys, ["审查 x", "exit"])
+
+        assert "再见" in out
+        assert "自动保留失败" in out
+
+    def test_startup_hint_on_nonempty_archive(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        _seed_last(home_dir, [{"type": "human", "data": {"content": "上次"}}])
+
+        out = self._repl(monkeypatch, capsys, ["exit"])
+
+        assert "检测到上次会话存档" in out
+        assert "/resume" in out
+
+    @pytest.mark.parametrize("seeded", [None, "[]", "{broken", "{}", "[1,2]"])
+    def test_startup_no_hint_without_usable_archive(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+        seeded: str | None,
+    ) -> None:
+        """无存档 / 空存档 / 损坏与结构非法存档都不提示（视同无存档，/resume 时明确报错）。"""
+        if seeded is not None:
+            _seed_last(home_dir, seeded)
+
+        out = self._repl(monkeypatch, capsys, ["exit"])
+
+        assert "检测到上次会话存档" not in out
+
+    def test_resume_loads_last_archive(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        seeded = [{"type": "human", "data": {"content": "上次对话"}}]
+        _seed_last(home_dir, seeded)
+
+        out = self._repl(monkeypatch, capsys, ["/resume", "exit"])
+
+        assert "会话已加载" in out
+        assert _FakeAgent.last is not None
+        assert _FakeAgent.last.loaded == [seeded]
+
+    def test_resume_corrupt_archive_reports_and_keeps_context(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        """结构自检失败提示存档不可用，正本不变（agent.load_session 未被调用）。"""
+        _seed_last(home_dir, "{broken")
+
+        out = self._repl(monkeypatch, capsys, ["/resume", "exit"])
+
+        assert "会话加载失败" in out
+        assert _FakeAgent.last is not None
+        assert _FakeAgent.last.loaded == []
+
+    def test_session_path_accepts_leading_underscore(self, home_dir: Path) -> None:
+        """_last 存档名（下划线开头）在 sessions 层合法（M7 放宽首字符类）。"""
+        assert sessions.session_path("_last").name == "_last.json"
