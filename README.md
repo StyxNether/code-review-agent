@@ -6,10 +6,10 @@
 
 ## 功能
 
-- 多轮对话式代码审查，具备上下文记忆（`/clear` 清空、`/undo` 作废上一轮、`/save` `/load` 会话持久化）
+- 多轮对话式代码审查，具备上下文记忆（`/clear` 清空、`/undo` 作废上一轮、`/save` `/load` 会话持久化、退出自动保留会话 + `/resume` 恢复）
 - Agent 自主调用工具：列目录 / 读文件 / 运行 Python 代码核实问题（基于 LangGraph 的 Agent 循环 + function calling）
 - 结构化审查结论：【严重/一般/建议】+ `文件:行号` + 修改建议
-- 多供应商模型配置：`cra config` 交互式管理 `~/.cra/models.json`，连通性自检（`cra config test`），REPL 内 `/change model` 热切换（上下文保留）
+- 多供应商模型配置：`cra config` 交互式管理 `~/.cra/models.json`，连通性自检（`cra config test`），REPL 内 `/change model` 热切换（上下文保留）与 `/setting` 设置菜单
 - 非交互审查：`cra review` 多路径批量、读 stdin、`-o` Markdown 报告、`--json` 结构化输出与分级退出码
 - 流式彩色输出（行级粒度：完整行即时渲染，围栏/列表整组不切段；`--no-stream` 可关）；LLM 瞬时失败自动重试（SDK 内建，认证错误快速失败）
 
@@ -44,11 +44,11 @@ uv run cra config          # 方式 A：交互式配置（推荐，支持多供�
 setx SE_CodeAgent "sk-你的key"   # 方式 B：环境变量（Windows；setx 后需新开终端生效）
                                  # macOS/Linux：export SE_CodeAgent="sk-你的key"
 
-# 3. 启动
-uv run cra chat
+# 3. 启动（`cra` 省略子命令默认进入对话，等价于 `uv run cra chat`）
+uv run cra
 ```
 
-裸 `cra` 命令安装（可选）：`uv tool install -e .` 之后可直接运行 `cra`（无需 `uv run` 前缀）。
+裸 `cra` 命令安装（可选）：`uv tool install -e .` 之后可直接运行 `cra`（无需 `uv run` 前缀）；省略子命令时默认进入对话式审查（裸形式不带参数，需传选项时写作 `cra chat --no-stream` 等）。
 
 首次运行时若无任何配置，会打印 `cra config` 引导并以退出码 2 结束。
 
@@ -94,8 +94,8 @@ uv run cra config test   # 连通性自检：对每个供应商发一次 max_tok
 ## 使用示例
 
 ```text
-$ uv run cra chat
-code-review-agent 已就绪（模型：deepseek/deepseek-flash）。提出审查需求即可；输入 /help 查看命令，exit 退出。
+$ uv run cra
+code-review-agent 已就绪（模型：deepseek/deepseek-flash）。提出审查需求即可；输入 /help 查看命令，exit 或 /exit 退出。
 你> 审查 src/cra/agent.py
 ⚙ read_file({"path": "src/cra/agent.py"})
   ↳ 完成（9xxx 字符）
@@ -120,13 +120,15 @@ code-review-agent 已就绪（模型：deepseek/deepseek-flash）。提出审查
 | `/help` | 命令列表 |
 | `/clear` | 清空上下文（系统提示词保留） |
 | `/change model`（别名 `/model`） | 列出供应商与模型清单、序号切换；上下文保留 |
+| `/setting` | 设置菜单（数字选择）：切模型 / 配置模型列表 / 保存 / 加载会话 / 执行确认开关；0 或回车返回对话 |
 | `/save [名称]` / `/load <名称>` | 会话持久化到 `~/.cra/sessions/<名称>.json` / 恢复（整体替换） |
+| `/resume` | 恢复最近一次自动保留的会话（`_last`） |
 | `/undo` | 作废上一轮对话 |
 | `/context` | 显示 token 用量与距截断阈值的余量 |
 | `/export [文件]` | 将最近一轮结论导出为 Markdown（默认 `cra-export.md`） |
 | `/process` | 显示最近一轮的过程明细（叙述全文/工具调用/结果预览） |
 | `/confirm [on\|off]` | run_python 执行前逐次确认（默认 off） |
-| `exit` 或 Ctrl+C | 退出 |
+| `exit` 或 `/exit`（或 Ctrl+C） | 退出；退出时自动保留会话（覆盖写入）到 `~/.cra/sessions/_last.json`，下次启动提示 `/resume` 可恢复 |
 
 ### cra review：非交互审查
 
@@ -158,6 +160,8 @@ uv run cra review a.py --json                   # 结构化 JSON 输出（stdout
 ```
 
 ### 全局参数（chat / review 通用）
+
+参数跟在子命令之后（如 `cra chat --no-stream`；裸 `cra` 形式不带参数）。
 
 | 参数 | 说明 |
 |------|------|
@@ -201,6 +205,7 @@ uv run ruff check .  # 代码规范检查
 - [x] 审查结果导出 Markdown 报告（`cra review -o` / `/export`）
 - [x] 批量审查多文件（`cra review` 多路径）
 - [x] 流式过程体验优化（行级流式 + 句级早发、过程/正文分层、`/process` 过程重放；设计见 docs/Design.md D15/D16）
+- [x] CLI 易用性（裸 `cra` 直接对话、`/setting` 设置菜单、`/exit`、会话自动保留 + `/resume`）
 
 ---
 
