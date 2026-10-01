@@ -36,6 +36,7 @@ _MARKER_RE = re.compile(r"\*{0,2}(【(?:严重|一般|建议)】|修改建议[�
 _VALID_SEVERITIES = ("严重", "一般", "建议")
 _MAX_REVIEW_LINES = 2000  # 单文件嵌入 prompt 的行数上限：防超大文件 token 爆炸（超出截断并明示）
 _DEFAULT_EXPORT_NAME = "cra-export.md"
+_AUTOSAVE_NAME = "_last"  # 会话自动保留的固定存档名（§7.3 M7；/resume 的数据来源）
 
 # ---- M6 渲染管线（D15）：行级单元流式的结构识别与阈值 ----
 _SENTENCE_FLUSH_CHARS = 60  # 句级早发阈值：无结构长行的待发字符数
@@ -55,14 +56,16 @@ REPL 内置命令：
   /help                          显示本帮助
   /clear                         清空上下文（系统提示词保留）
   /change model（别名 /model）    列出供应商与模型并切换（上下文保留）
+  /setting                       设置菜单（切模型/配置模型列表/存取会话/执行确认）
   /save [名称]                   保存会话到 ~/.cra/sessions/<名称>.json
   /load <名称>                   从文件恢复会话（整体替换当前会话）
+  /resume                        恢复最近一次自动保留的会话（_last）
   /undo                          作废上一轮对话
   /context                       显示 token 用量与距截断阈值的余量
   /export [文件]                 导出最近一轮结论为 Markdown（默认 cra-export.md）
   /process                       显示最近一轮的过程明细（叙述/工具调用/结果预览）
   /confirm [on|off]              run_python 执行前逐次确认（默认 off）
-  exit 或 Ctrl+C                 退出
+  exit 或 /exit 或 Ctrl+C        退出（自动保留会话，/resume 可恢复）
 其余 /xxx 按普通文本发送给模型。"""
 
 _CONFIG_FILE_NOTICE = (
@@ -808,6 +811,59 @@ def _cmd_confirm(state: _ReplState, argument: str) -> None:
     state.console.print(f"run_python 执行确认：{current}（默认 off；--ask-exec 可在启动时开启）。", markup=False)
 
 
+_SETTING_MENU = """\
+设置菜单：
+  1) 切换当前会话模型
+  2) 配置模型列表（供应商/模型/key）
+  3) 保存会话
+  4) 加载会话
+  5) run_python 执行确认开关
+  0) 返回对话（回车同效）"""
+
+
+def _cmd_setting(state: _ReplState) -> None:
+    """/setting（§7.3 M7）：数字选择菜单，全部复用既有命令实现（纯接线）。
+
+    嵌套循环：单项操作失败或取消后回到菜单，0/回车退出菜单回到 REPL 主循环；
+    菜单全程不触碰会话消息，上下文不丢。EOF/Ctrl+C 经 _ask 归一为取消。
+    各复用命令的失败模式已核对为"可读提示 + return"（无 sys.exit）；配置
+    交互循环经 _config_interactive_session 复用，损坏配置以 ConfigError 表达、
+    由菜单降级为回菜单。
+    """
+    console = state.console
+    while True:
+        console.print(_SETTING_MENU, markup=False, highlight=False)
+        choice = _ask("选择：")
+        if choice is None or choice in ("", "0"):
+            return
+        if choice == "1":
+            _cmd_change_model(state)
+        elif choice == "2":
+            # 会话进行中配置文件可能损坏（如用户手工编辑），读取与交互一并降级：
+            # ConfigError → 可读提示后回菜单，不终止整个会话
+            try:
+                data = config.load_raw()
+                _config_interactive_session(console, data)
+            except config.ConfigError as exc:
+                _print_broken_config(console, exc)
+                console.print("配置操作已中止，回到设置菜单。", markup=False)
+                continue
+        elif choice == "3":
+            name = _ask("会话名称（回车取消）：")
+            if name:
+                _cmd_save(state, name)
+        elif choice == "4":
+            name = _ask("会话名称（回车取消）：")
+            if name:
+                _cmd_load(state, name)
+        elif choice == "5":
+            value = _ask("on / off（回车显示当前状态）：")
+            if value is not None:
+                _cmd_confirm(state, value)
+        else:
+            console.print("无效选择。", markup=False)
+
+
 def _handle_command(user_input: str, state: _ReplState) -> bool:
     """内置 REPL 命令分发（§7.3）；返回 False 表示按普通文本交给模型。"""
     if not user_input.startswith("/"):
@@ -839,9 +895,47 @@ def _handle_command(user_input: str, state: _ReplState) -> bool:
         _cmd_process(state)
     elif command == "/confirm":
         _cmd_confirm(state, argument)
+    elif command == "/setting":
+        _cmd_setting(state)
+    elif command == "/resume":
+        _cmd_load(state, _AUTOSAVE_NAME)
     else:
         return False
     return True
+
+
+def _hint_last_session(console: Console) -> None:
+    """启动时检测到非空自动保留存档则提示一行（§7.3 M7；不自动加载，避免上下文静默混入）。"""
+    path = sessions.session_path(_AUTOSAVE_NAME)  # "_last" 恒为合法名（sessions 层校验通过）
+    if not path.exists():
+        return
+    try:
+        archived = sessions.load_session(path)
+    except Exception:  # noqa: BLE001 — 启动提示路径：任何读取/解析/结构失败都视同无存档（/resume 时明确报错）
+        return
+    if archived:
+        console.print("[dim]检测到上次会话存档，输入 /resume 可恢复。[/]")
+
+
+def _autosave_session(state: _ReplState) -> None:
+    """REPL 以任何方式退出时把当前会话覆盖写入 _last.json（§7.3 M7 会话自动保留）。
+
+    空会话跳过：新开即退的空会话不该覆盖上一次的有效存档。失败仅提示不阻断
+    退出——自动保留是尽力而为的便利功能，不能把"退出"变成故障路径（在 finally
+    中执行，兜底不得上抛）。
+    """
+    console = state.console
+    try:
+        data = state.agent.dump_session()
+        if not data:
+            return
+        sessions.save_session(sessions.session_path(_AUTOSAVE_NAME), data)
+        console.print(f"[dim]会话已自动保留（{len(data)} 条消息，/resume 可恢复）。[/]")
+    except Exception as exc:  # noqa: BLE001 — 退出路径兜底：任何失败（磁盘/权限/序列化/收尾打印）只提示
+        try:
+            console.print(f"会话自动保留失败：{type(exc).__name__}: {exc}", markup=False)
+        except Exception:  # noqa: BLE001,S110 — 失败提示自身不得上抛（输出流断开时退出仍保持干净）
+            pass
 
 
 def _run_chat(
@@ -852,7 +946,8 @@ def _run_chat(
     max_rounds: int = MAX_TOOL_ROUNDS,
     ask_exec: bool = False,
 ) -> None:
-    """REPL 主循环：内置命令族（§7.3）分发，其余输入交给 Agent。"""
+    """REPL 启动与收尾：解析模型配置、构建 Agent 与会话状态后进入主循环，
+    以任何方式退出时自动保留会话（§7.3 M7）；命令分发与对话轮次见 _repl_loop。"""
     console = Console()
     if max_rounds < 1:
         console.print("--max-rounds 必须是不小于 1 的整数。", style="red", markup=False)
@@ -873,8 +968,19 @@ def _run_chat(
     )
     console.print(
         f"[bold]code-review-agent[/] 已就绪（模型：{_model_label(resolved)}）。"
-        "提出审查需求即可；输入 /help 查看命令，exit 退出。"
+        "提出审查需求即可；输入 /help 查看命令，exit 或 /exit 退出。"
     )
+    _hint_last_session(console)
+    try:
+        _repl_loop(state)
+    finally:
+        # 覆盖 exit / /exit / EOF / Ctrl+C 全部退出路径（§7.3 M7 会话自动保留）
+        _autosave_session(state)
+
+
+def _repl_loop(state: _ReplState) -> None:
+    """REPL 输入主循环；退出路径（含 EOF/Ctrl+C）一律 return，由调用方统一自动保留。"""
+    console = state.console
     while True:
         try:
             # 提示符着色便于在流式输出中定位输入位置（M2 验收反馈）
@@ -885,7 +991,7 @@ def _run_chat(
             return
         if not user_input:
             continue  # 空输入/纯空白直接进入下一轮提示，不调 API（§6）
-        if user_input == "exit":
+        if user_input in ("exit", "/exit"):
             console.print("再见。")
             return
         if _handle_command(user_input, state):
@@ -1161,15 +1267,30 @@ def _config_update_key(session: _ConfigSession) -> None:
     session.save()
 
 
-def _run_config_interactive() -> None:
-    """cra config 交互式配置模式（§7.4）：增删供应商/模型、设默认、改 key。"""
-    console = Console()
+def _print_broken_config(console: Console, exc: config.ConfigError) -> None:
+    """配置文件损坏的可读提示（cra config 退出前与 /setting 菜单内共用）。"""
+    console.print(f"配置文件损坏：{exc}", style="red", markup=False)
+    console.print("请手工修复该文件，或删除后重试（将重建空配置）。", markup=False)
+
+
+def _run_config_interactive(console: Console | None = None) -> None:
+    """cra config 交互式配置模式（§7.4）：增删供应商/模型、设默认、改 key。
+
+    独立运行（cra config）时损坏配置按运行错误退出 2（§7.5）；/setting 菜单
+    复用 _config_interactive_session 并自行处理 ConfigError（M7），不依赖
+    退出码数值做降级契约。
+    """
+    console = console or Console()
     try:
         data = config.load_raw()
     except config.ConfigError as exc:
-        console.print(f"配置文件损坏：{exc}", style="red", markup=False)
-        console.print("请手工修复该文件，或删除后重试（将重建空配置）。", markup=False)
+        _print_broken_config(console, exc)
         sys.exit(2)
+    _config_interactive_session(console, data)
+
+
+def _config_interactive_session(console: Console, data: dict[str, Any]) -> None:
+    """配置交互主循环（cra config 与 /setting 菜单共用）；data 已加载、可损坏校验已过。"""
     session = _ConfigSession(console, data)
     console.print(f"cra 配置（{config.config_path()}）", markup=False)
     _print_providers(console, data)
@@ -1542,10 +1663,17 @@ def _add_shared_options(parser: argparse.ArgumentParser, *, no_stream_help: str 
 def _build_parser() -> argparse.ArgumentParser:
     """构建 CLI 参数解析器（§7.1/§7.2）。"""
     parser = argparse.ArgumentParser(
-        prog="cra", description="基于 LLM 的命令行代码审查助手"
+        prog="cra",
+        description=(
+            "基于 LLM 的命令行代码审查助手；"
+            "省略子命令默认进入对话式审查 REPL（等价于 cra chat，裸形式不带参数）"
+        ),
     )
     parser.add_argument("--version", action="version", version=_version_text())
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    # M7 裸入口：子命令可选，缺省由 main 进入 chat REPL（§7.1）。
+    # 共享参数不加在顶层——argparse 子解析器默认值会覆盖顶层同名值，
+    # 选项面保持在子命令之后（cra chat --no-stream），行为与 M5 起一致
+    subparsers = parser.add_subparsers(dest="command", required=False)
     # §8.2 核对项：限制声明在 CLI 层面可见（工具 description 之外的第二道明示）
     chat = subparsers.add_parser(
         "chat",
@@ -1597,20 +1725,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """cra 入口。"""
+    """cra 入口（§7.1）：省略子命令默认进入 chat REPL（M7 裸入口）。"""
     args = _build_parser().parse_args()
-    if args.command == "chat":
-        _run_chat(
-            model=args.model,
-            provider=args.provider,
-            no_stream=args.no_stream,
-            max_rounds=args.max_rounds,
-            ask_exec=args.ask_exec,
-        )
-    elif args.command == "review":
+    if args.command == "review":
         _run_review(args)
     elif args.command == "config":
         if args.config_action == "test":
             _run_config_test()
         else:
             _run_config_interactive()
+    elif args.command in (None, "chat"):
+        # 裸入口与 chat 共用参数面：getattr 缺省值须与 _add_shared_options 的
+        # default 完全一致（MAX_TOOL_ROUNDS / None / store_true 的 False），
+        # 否则裸 cra 与 cra chat 行为会静默分叉（有测试锁定）
+        _run_chat(
+            model=getattr(args, "model", None),
+            provider=getattr(args, "provider", None),
+            no_stream=getattr(args, "no_stream", False),
+            max_rounds=getattr(args, "max_rounds", MAX_TOOL_ROUNDS),
+            ask_exec=getattr(args, "ask_exec", False),
+        )

@@ -10,8 +10,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-# 名称仅限安全字符：会话名直接拼进文件路径，拒绝路径分隔符与 ".." 穿越写点
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+# 名称仅限安全字符：会话名直接拼进文件路径，禁止分隔符使任何合法名称（含
+# ".."）都只能是单个路径成分、无法穿越；首字符允许下划线——自动保留存档
+# 固定名 _last（§7.3 M7）落在同一命名空间
+_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 # Windows 保留设备名（大小写不敏感）：作为文件名主干会导致写入失败或行为异常
 _WINDOWS_RESERVED = frozenset(
     ["con", "nul", "prn", "aux", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))]
@@ -27,7 +29,7 @@ def session_path(name: str) -> Path:
     """会话名称 → 文件路径；非法名称（空串/特殊字符/路径穿越/保留设备名）抛 ValueError。"""
     if not _NAME_RE.match(name):
         raise ValueError(
-            f"会话名称 {name!r} 非法：仅限字母、数字、下划线、连字符与点，且以字母数字开头。"
+            f"会话名称 {name!r} 非法：仅限字母、数字、下划线、连字符与点，且以字母、数字或下划线开头。"
         )
     if name.endswith(".") or name.split(".")[0].lower() in _WINDOWS_RESERVED:
         raise ValueError(f"会话名称 {name!r} 不可用：Windows 保留设备名或以点结尾。")
