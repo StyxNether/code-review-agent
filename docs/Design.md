@@ -3,7 +3,7 @@
 《软件工程与项目实践》第 1 次作业 · 提交截止 2026-10-07 24:00（作业二将复用本项目成果，见 §2.2 与 §10）
 平台环境：Windows + Git Bash（PowerShell/CMD 兼容）。
 
-> 本文描述**目标形态**；截至 M4 修复轮，代码与 README 已完成 LangChain 迁移（§3/§4 D8），仅 M5/M6 排期内容（§7 配置与 CLI 面、§10 流式体验）仍属目标形态，差异由 M5/M6 消除。M7（CLI 易用性：裸入口 / 设置菜单 / 会话自动保留，2026-10-01 用户提出）为作业一可选增强，§7.1/§7.3 中标注 M7 的条目在其落地前同属目标形态。
+> 本文描述**目标形态**；截至 M7，已排期内容（M0–M7，§10）全部落地，代码、README 与本文一致；仅 §2.2 的作业二接缝属"预留未实现"。M7（CLI 易用性：裸入口 / 设置菜单 / 会话自动保留，2026-10-01 用户提出）已于 2026-10-01 落地。
 
 ## 1. 项目概述
 
@@ -164,7 +164,7 @@ tests/
 ### 7.1 CLI 子命令
 
 ```
-cra        [选项]                  # 省略子命令：默认进入对话式审查 REPL（M7，§10）
+cra                              # 省略子命令：默认进入对话式审查 REPL（M7；裸形式不带参数，选项用 cra chat 传入）
 cra chat   [选项]                  # 进入对话式审查 REPL
 cra review <path...> | -  [选项]   # 非交互一次性审查（- 读 stdin；多路径=批量）
 cra config [test]                  # 交互式配置模式；test 为连通性自检
@@ -271,21 +271,22 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 | M4 框架迁移 | 1 个编码会话；净变化 ±300 LOC 待实测（middleware/流式适配/无状态包装可能净增）+ 测试重写 ~400 行 | 1 个编码会话；迁移本体净 **-134 LOC**（3273 → 3139），验收修复轮 +201、cra 自审修复轮 +247 → 3587；测试重写与增补 56→63 项（test_agent 27→43、test_llm 29→20、exec/cli 增补），总数 152→173 |
 | M5 配置与 CLI 面 | 1–2 个编码会话；净增 ~800–1200 LOC（含测试） | 1 个编码会话；净增 **+2826 LOC**（3587 → 6413：src 1387→2672、tests 2070→3611、scripts 不变）；测试 173→297 项 |
 | M6 流式过程体验 | 1 个编码会话；净增 ~300–500 LOC（渲染管线重写 + 测试） | 1 个编码会话；净增 **+864 LOC**（6413 → 7277：src 2672→3131、tests 3611→4016、scripts 不变）；测试 313→329 项；cra 自审 1 严重 + 1 一般 + 2 建议 → 修复 + 复核轮 6 建议落地 |
+| M7 CLI 易用性 | 1 个编码会话；净增 ~150–250 LOC（含测试） | 1 个编码会话；净增 **+493 LOC**（7277 → 7770：src 3131→3264、tests 4016→4376、scripts 不变；超估算主因新用例 25 项 / +360 测试行）；测试 329→354 项；cra 自审三轮（初审 2 一般 + 6 建议 → 复核 2 一般 + 4 建议 → 终审 0 严重、2 一般 + 3 建议，处置见 §8.3） |
 
-### 8.2 代码评审 Checklist（收尾门禁；M0–M6 每次收尾逐项执行，当前记录：M6）
+### 8.2 代码评审 Checklist（收尾门禁；M0–M7 每次收尾逐项执行，当前记录：M7）
 
-- [x] 全仓库 grep 无明文密钥；key 读取点唯一（config 层） ✅（M6 复执行：grep 无命中；渲染层不接触 key）
-- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅（M6 渲染层未新增 except；_run_turn 兜底分支保持 `except Exception` + 可读展示）
-- [x] `run_python` 有超时强杀与输出截断 ✅（M6 未改动工具层与 middleware）
-- [x] Agent 循环有最大工具轮次（10）限制 ✅（M6 未改动）
-- [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅（M6 未改动）
-- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M6 未改动声明，有测试锁定）
-- [x] README 每条命令逐条实测可复制执行 ✅（M6：既有命令未变；新增 REPL 命令 /process 有用例；README 流式描述与命令表同步）
-- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M6 后 329 项：cli 69、agent 58、config 41、llm 31、review 26、fs 23、exec 23、config 交互 20、sessions 17、registry 11、样例 10；渲染管线新增行级/围栏/句级/暂扣/样式与 /process 用例）
-- [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅（M6：_scan_group 谓词 Callable[[str], bool]；正则→谓词映射集中）
-- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅（M6 渲染重构不新增依赖方向；框架类型仍不出 agent 层）
+- [x] 全仓库 grep 无明文密钥；key 读取点唯一（config 层） ✅（M7 复执行：grep 无命中；自动保留只写对话消息序列、不涉 key）
+- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅（M7 新增兜底均有 noqa 与注释陈述理由：_autosave_session 的 `except Exception`（退出路径失败仅提示）、失败提示自身的嵌套兜底（BLE001/S110，finally 中不得上抛）、_hint_last_session 的 `except Exception`（启动提示视同无存档）；菜单降级走 ConfigError 类型契约，不吞 SystemExit）
+- [x] `run_python` 有超时强杀与输出截断 ✅（M7 未改动工具层与 middleware）
+- [x] Agent 循环有最大工具轮次（10）限制 ✅（M7 未改动）
+- [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅（M7 未改动）
+- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M7 未改动声明，有测试锁定；裸入口 `cra --help` description 同步说明默认行为）
+- [x] README 每条命令逐条实测可复制执行 ✅（M7 实测：裸 `cra` 进 REPL、/help 新命令、/setting 菜单嵌套循环（→配置交互→回菜单→回对话）、exit 退出、`cra nope` 仍 invalid choice 退出 2；命令表/全局参数/功能清单已同步）
+- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M7 后 354 项；新增：裸入口默认分支与语义反转、裸入口与 chat 参数缺省一致性锁定、菜单分发（mock 既有命令函数验证映射与返回菜单）、菜单嵌套循环与损坏配置降级、/exit、退出自动保留（exit//exit/EOF 三路径）、空会话跳过不覆盖旧存档、写盘失败不阻断退出、启动提示（非空/缺失/空/损坏/结构非法）、/resume 恢复与损坏存档正本不变、_last 名称合法性）
+- [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅（M7：_cmd_setting/_repl_loop/_autosave_session/_hint_last_session 均带 docstring；conftest home_dir 改 autouse 附隔离理由）
+- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅（M7 无新增依赖方向；_config_interactive_session 抽取仅在 cli 层内部）
 - [x] `git status` 干净：无 venv/缓存/密钥/开发辅助文档被跟踪 ✅
-- [x] Design.md 与实现一致（模型、工具名、模块、入口、配置项、CLI 面） ✅（M6 回写：§3.1(7) 行级流式、§7.3 /process、§10 M6 结论、D15/D16）
+- [x] Design.md 与实现一致（模型、工具名、模块、入口、配置项、CLI 面） ✅（M7 回写：§7.1 裸入口行、头部目标形态说明、§10 M7 落地注记、§8.1/本节）
 
 ### 8.3 复盘、缺陷记录与 PIP
 
@@ -338,6 +339,19 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
     - 复核轮（对象 = 修复 diff）：**确认严重项修复有效**（审查者用回退对照复现了修复前的拆碎行为，并跑了 69 项 cli 测试 + 800 例行/围栏/空行随机模糊，内容无丢失、顺序不变）；新发现 6 项【建议】全部落地：flush 归一化改 `rstrip` 保留首行缩进（冲洗内容可能是缩进代码/围栏）；正则→谓词映射集中（`_heading_line` 等六个具名谓词，`_is_structured_line`/`_is_block_opener` 复用）；列表成员谓词提为具名 `_list_member`；"自审严重项"等流程性注释改写为陈述坐标不变量。
     - 附注：复核确认 markup 注入面（/process 与工具打点均 `markup=False`/Text 组装）、`_run_review` 顶层兜底不误吞 SystemExit/KeyboardInterrupt、可变默认值均无问题。
   - 模型侧行为备注：自审第一轮经 `cra chat` 执行时再现 DSML 工具调用标记当正文输出的怪癖（M4 起第三次记录），属模型侧行为，不处置；改用 `cra review -`（stdin 直通、结论 stdout 纯文本）完成审查。
+- **M7 编码期记录（2026-10-01，入口接线；无严重遗留）**：
+  - **实现决策注记**：
+    - 裸形式不带参数：argparse 子解析器会用自身默认值覆盖顶层同名参数值（`cra --no-stream chat` 的 no_stream 会被 chat 子解析器重置），故共享参数面保持在子命令之后；main 用 `getattr(args, …, 缺省)` 分发裸入口，缺省值与 `_add_shared_options` 的一致性有专门测试锁定。§7.1 的 `cra [选项]` 草图据此修订为 `cra`（裸形式不带参数）。
+    - /setting 纯接线：1/3/4/5 直接复用 _cmd_change_model/_cmd_save/_cmd_load/_cmd_confirm；2 复用配置交互主循环——从中拆出 `_config_interactive_session(console, data)`（独立运行仍走 _run_config_interactive 包损坏配置退出 2，§7.5 契约不变），菜单内以 ConfigError 类型降级回菜单，不依赖退出码数值做跨函数契约（cra 复核轮建议）。
+    - 菜单嵌套循环：操作失败/取消（含 EOF/Ctrl+C 经 _ask 归一）一律回菜单，0/回车回 REPL 主循环；菜单全程不触碰会话消息，上下文不丢。
+    - 自动保留：try/finally 包裹 REPL 主循环（拆出 _repl_loop），覆盖 exit //exit/EOF/Ctrl+C 全部退出路径；**空会话跳过**（新开即退不覆盖上次有效存档）；失败仅提示不阻断退出（finally 中函数自身不得上抛，收尾打印亦在兜底内）；启动检测到非空存档打印一行提示、不自动加载；/resume = /load _last（agent.load_session 结构自检失败正本不变）。
+    - sessions 名称白名单放开首字符下划线（_last 落同一命名空间；分隔符禁用使穿越防护不变），错误消息同步"以字母、数字或下划线开头"（cra 终审发现）。
+    - 测试隔离升级：conftest 的 home_dir 改 autouse——自动保留使每次 REPL 退出都写 ~/.cra/sessions/_last.json，不隔离会污染真实用户目录；全部 354 项在 tmp 用户目录下运行。
+  - **M7 cra 自审记录（DoD 第 4 条，2026-10-01，三轮：初审 + 复核 + 终审确认）**：
+    - 初审（对象 = M7 全量 diff，经 `cra review -`）：【一般】×2 + 【建议】×6——采纳落地：菜单兜底收敛到分发层（后经复核演进为 ConfigError 契约）、_hint_last_session 放宽为 Exception 并补"可解析但结构非法"存档用例、裸入口缺省值一致性注释 + 锁定测试、main 显式 `in (None, "chat")` 分支、自动保留提示带消息条数 + README 标注覆盖语义、/confirm 菜单用例断言改精确状态行（原断言被菜单回显文本满足恒真）、欢迎横幅同步 /exit。
+    - 复核轮（对象 = 修复后 src diff）：【一般】×2 + 【建议】×4——采纳落地：自动保留成功打印移入 try、退出码魔法值改 ConfigError 类型契约（拆 _config_interactive_session）、_run_chat docstring 更新（拆出 _repl_loop 后职责准确）、sessions 注释据实（".." 防护实由分隔符禁用承载）。现场发现一处测试设计缺陷并修正：patch load_raw 会连带破坏 REPL 启动解析（resolve 同源），改 patch _config_interactive_session 并把菜单内 load+session 整体纳入 try——对应"会话进行中配置损坏"的真实场景。
+    - 终审（对象 = 复核后 src diff）：**0 严重**；【一般】×2（错误消息与正则不同步 → 采纳修复；_last 命名空间冲突 → 不采纳）+ 【建议】×3（均不采纳）。
+    - **未采纳项记录**：① `_last` 独立保留名（初审/复核/终审三轮重提）：设计规格明文"覆盖写入 ~/.cra/sessions/_last.json"与"/resume = /load _last"，独立目录/不可构造名偏离规格；README 与 /help 已声明该名用途，用户显式 /save _last 即显式选择覆盖"最近会话"，语义自洽。② _hint_last_session 的 session_path 防御性 ValueError 包裹：`_last` 合法性由 test_session_path_accepts_leading_underscore 锁定，常量与校验同仓库演进，改名时测试先失败。③ 启动判空改文件大小启发式：会话文件 KB 级、启动解析一次成本微秒级，完整校验还保证损坏文件不触发误导性提示。④ --help 再显式点明裸形式限制：description 与 README 已写明"裸形式不带参数"。
 - 估算偏差：规模见 §8.1（估算 ~1000 LOC → M3 收尾实测 3273 LOC）；人工投入与日历时间未逐项记录（见 §8.1 人工投入行）。
 - 过程问题：
 - PIP（下一项目为结对项目，将在本项目上增量开发与重构）：
@@ -363,13 +377,14 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
   3. 思考过程展示：评估结论 = **不透传 `reasoning_content`**（D16），以提示词引导"工具调用前一句意图说明 + 开工前审查思路"替代；
   4. 可折叠可行性结论：**真折叠不可行**——折叠需改写/收起已打印内容，只能靠 VT 光标回退重绘或 rich.Live，两者在 Windows 传统控制台可靠性差（与 D5 同因，rich Live 方案复评仍排除）；采用**紧凑摘要行（⚙/↳ 打点即紧凑形态）+ `/process` 可选重放**替代。
 
-- **M7 CLI 易用性**（作业一可选增强，2026-10-01 用户提出"命令行使用更轻松"；截止 2026-10-07 前执行，任务 4 可裁剪）：
+- **M7 CLI 易用性**（已落地 2026-10-01；作业一可选增强，2026-10-01 用户提出"命令行使用更轻松"）：
   1. **裸入口**：`cra`（省略子命令）默认进入 chat REPL——argparse 子命令可选化 + 默认分支，既有子命令与全局参数面不变；缺失子命令的既有测试语义反转（原期望报错退出）；
   2. **`/setting` 设置菜单**：REPL 内数字选择，**全部复用既有实现**（纯接线）——1) 切换当前会话模型（= /change model） 2) 配置模型列表（= `cra config` 交互函数：增删供应商/模型、设默认、改 key） 3) 保存会话 4) 加载会话 5) 执行确认开关；0/回车返回对话；菜单内任何操作不丢上下文；
   3. **`/exit`**：退出（与 `exit` 等价）；`/help` 与 README 命令表同步；
-  4. **会话自动保留**（难度低、效果好，时间紧可裁剪）：退出时自动把当前会话覆盖写入 `~/.cra/sessions/_last.json`，启动检测到非空存档打印提示（不自动加载）；`/resume`（= /load _last）恢复，结构自检失败提示不可用。
+  4. **会话自动保留**：退出时自动把当前会话覆盖写入 `~/.cra/sessions/_last.json`，启动检测到非空存档打印提示（不自动加载）；`/resume`（= /load _last）恢复，结构自检失败提示不可用。
   **明确不做**：Web 界面（D3 冻结 + 性价比评估见 Backlog）；菜单内再做二级工作区抽象（超出作业一体量）。
   范围理由：用户示例流程（裸 `cra` → 直接对话；`/setting` → 数字菜单 → 切换模型/配置模型列表）绝大多数是既有能力的入口接线，新增逻辑集中在 argparse 默认分支、菜单循环与自动存档，估计 +150~250 LOC（含测试），1 个编码会话。
+  **落地注记（2026-10-01）**：① 裸形式不带参数——argparse 子解析器默认值会覆盖顶层同名参数值，共享参数面保持在子命令之后（§7.1 已按实现修订）；② /setting 全部复用既有命令函数（_cmd_change_model / _cmd_save / _cmd_load / _cmd_confirm 与 `cra config` 交互循环；后者增可选 console 参数以复用 REPL 终端面，菜单内捕获其损坏配置时的 SystemExit(2) 降级为回菜单，会话不终止）；③ 自动保留对**空会话跳过**——新开即退的空会话不覆盖上一次的有效存档；④ sessions 名称白名单放开首字符下划线（存档名 `_last`；防穿越语义不变）；⑤ 测试隔离升级：conftest 的 home_dir fixture 改为 autouse（自动保留会写 ~/.cra/sessions/_last.json，全部测试须与真实用户目录隔离）。
 
 **作业二规划**（Simple Workflow MVP，不提前实现）：代码审查工作流方向——以本项目 Agent 为节点（§2.2 接缝），LangGraph `StateGraph` 编排"编码→审查→修复"或同等流程；顺序执行为 MVP，分支/并行/日志追踪按作业二推荐项递增。
 
