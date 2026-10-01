@@ -419,6 +419,20 @@ def test_longer_fence_not_closed_by_inner_short_fence() -> None:
     assert out.count("x") == 1  # 内部 ``` 未提前闭合围栏
 
 
+def test_fence_after_blank_line_in_single_feed() -> None:
+    """cra 自审严重项回归：空行消费后的缓冲切片曾使围栏开栏偏移坐标失配，
+    一次投喂（--no-stream 与返回值兜底路径的形态）时围栏被拆成普通行。
+    修复 = 空行分支同步平移 limit。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("前言。\n\n```python\nprint('hi')\n```\n")
+
+    out = console.export_text(clear=False)
+    assert "前言。" in out
+    assert "```" not in out  # 围栏标记不字面出现（整组经 Markdown 代码块渲染）
+    assert "print('hi')" in out
+
+
 def test_in_fence_state() -> None:
     assert not _in_fence("a\n\nb")
     assert _in_fence("```py\nx")

@@ -10,7 +10,7 @@ import getpass
 import json
 import re
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError
@@ -164,6 +164,21 @@ def _is_block_opener(line: str) -> bool:
     )
 
 
+def _table_line(line: str) -> bool:
+    """表格组成员判定。"""
+    return _TABLE_RE.match(line) is not None
+
+
+def _quote_line(line: str) -> bool:
+    """引用组成员判定。"""
+    return _QUOTE_RE.match(line) is not None
+
+
+def _indented_line(line: str) -> bool:
+    """缩进代码组成员判定。"""
+    return _INDENTED_RE.match(line) is not None
+
+
 def _sentence_cut(tail: str) -> int | None:
     """残行中第一个可安全切断的句界偏移（切点含句读字符本身）；无则 None。
 
@@ -296,9 +311,9 @@ class _StreamingMarkdown:
         回答堆叠。围栏状态不必跨冲洗保留——冲洗即消息边界，后续文本重新
         从围栏外开始（缓冲内未闭合围栏随平文输出，不影响下一条消息）。
         """
-        parts = [text for text, _ in self._held]
+        parts = [text.strip() for text, _ in self._held if text.strip()]
         if self._buffer.strip():
-            parts.append(self._buffer)
+            parts.append(self._buffer.strip())
         self._held.clear()
         self._buffer = ""
         if not parts:
@@ -358,6 +373,7 @@ class _StreamingMarkdown:
             return unit
         if open_at is None:
             return self._sentence_unit()
+        buffer = self._buffer  # _lead_unit 可能已消费前导空行，围栏分支用当前缓冲
         span = _fence_span(buffer)
         if span is None:
             return None  # 围栏未闭合：从开栏行起扣住（完整性保护）
@@ -374,7 +390,10 @@ class _StreamingMarkdown:
                 return None  # 完整行耗尽（残行交给句级早发/finish）
             line = buffer[offset:newline]
             if not line.strip():
-                self._buffer = buffer = buffer[newline + 1 :]  # 空行=段落边界
+                step = newline + 1
+                self._buffer = buffer = buffer[step:]  # 空行=段落边界
+                if limit is not None:
+                    limit -= step  # 空行只出现在围栏前，坐标随切片同步平移（自审严重项）
                 self._pending_break = True
                 offset = 0
                 continue
@@ -398,19 +417,17 @@ class _StreamingMarkdown:
         if _HEADING_RE.match(first):
             return first, line_end  # ATX 标题自成一单元
         if _LIST_RE.match(first):
-            return self._scan_group(
-                buffer, offset, limit, lambda l: not _is_block_opener(l)
-            )
+            return self._scan_group(buffer, offset, limit, lambda line: not _is_block_opener(line))
         if _TABLE_RE.match(first):
-            return self._scan_group(buffer, offset, limit, _TABLE_RE.match)
+            return self._scan_group(buffer, offset, limit, _table_line)
         if _QUOTE_RE.match(first):
-            return self._scan_group(buffer, offset, limit, _QUOTE_RE.match)
+            return self._scan_group(buffer, offset, limit, _quote_line)
         if _INDENTED_RE.match(first):
-            return self._scan_group(buffer, offset, limit, _INDENTED_RE.match)
+            return self._scan_group(buffer, offset, limit, _indented_line)
         return first, line_end  # 普通行/标记行：单行单元
 
     def _scan_group(
-        self, buffer: str, offset: int, limit: int | None, member: Any
+        self, buffer: str, offset: int, limit: int | None, member: Callable[[str], bool]
     ) -> tuple[str | None, int]:
         """从 offset 起收集连续组成员，直到终止行；组未终止（缓冲耗尽且无
         终止行）返回 None——整组等待，避免列表/表格被打印边界拆开。"""
