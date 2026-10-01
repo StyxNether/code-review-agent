@@ -11,7 +11,7 @@
 - 结构化审查结论：【严重/一般/建议】+ `文件:行号` + 修改建议
 - 多供应商模型配置：`cra config` 交互式管理 `~/.cra/models.json`，连通性自检（`cra config test`），REPL 内 `/change model` 热切换（上下文保留）
 - 非交互审查：`cra review` 多路径批量、读 stdin、`-o` Markdown 报告、`--json` 结构化输出与分级退出码
-- 流式彩色输出（`--no-stream` 可关）；LLM 瞬时失败自动重试（SDK 内建，认证错误快速失败）
+- 流式彩色输出（行级粒度：完整行即时渲染，围栏/列表整组不切段；`--no-stream` 可关）；LLM 瞬时失败自动重试（SDK 内建，认证错误快速失败）
 
 ## 架构
 
@@ -124,6 +124,7 @@ code-review-agent 已就绪（模型：deepseek/deepseek-flash）。提出审查
 | `/undo` | 作废上一轮对话 |
 | `/context` | 显示 token 用量与距截断阈值的余量 |
 | `/export [文件]` | 将最近一轮结论导出为 Markdown（默认 `cra-export.md`） |
+| `/process` | 显示最近一轮的过程明细（叙述全文/工具调用/结果预览） |
 | `/confirm [on\|off]` | run_python 执行前逐次确认（默认 off） |
 | `exit` 或 Ctrl+C | 退出 |
 
@@ -199,7 +200,7 @@ uv run ruff check .  # 代码规范检查
 
 - [x] 审查结果导出 Markdown 报告（`cra review -o` / `/export`）
 - [x] 批量审查多文件（`cra review` 多路径）
-- [ ] 流式过程体验优化（行/句级渲染、思考过程展示）
+- [x] 流式过程体验优化（行级流式 + 句级早发、过程/正文分层、`/process` 过程重放；设计见 docs/Design.md D15/D16）
 
 ---
 

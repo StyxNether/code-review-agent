@@ -259,27 +259,28 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 
 | 项 | 估算 | 实际 |
 |----|------|------|
-| 总规模 | ~1000 LOC（含测试，git 统计为准） | 6413 LOC（截至 M5：src 2672 + tests 3611 + scripts 130，`git ls-files "*.py"` 统计、fixtures 豁免）；M6 完成后重估 |
+| 总规模 | ~1000 LOC（含测试，git 统计为准） | 7277 LOC（截至 M6：src 3131 + tests 4016 + scripts 130，`git ls-files "*.py"` 统计、fixtures 豁免）；作业一定稿 |
 | 人工投入 | 设计评审 0.5h + 里程碑验收 0.25h×n + 收尾 0.5h | M0–M2 验收实测共 22 分钟；此后未再逐项记录 |
 | AI 生成 | 全部实现代码与测试初稿 | 一致：AI 编码会话生成，人工评审设计、逐里程碑验收 |
 | 日历时间 | 2–3 天（4 个编码会话） | 1 天完成 M0–M3 编码与验收 |
 | M4 框架迁移 | 1 个编码会话；净变化 ±300 LOC 待实测（middleware/流式适配/无状态包装可能净增）+ 测试重写 ~400 行 | 1 个编码会话；迁移本体净 **-134 LOC**（3273 → 3139），验收修复轮 +201、cra 自审修复轮 +247 → 3587；测试重写与增补 56→63 项（test_agent 27→43、test_llm 29→20、exec/cli 增补），总数 152→173 |
 | M5 配置与 CLI 面 | 1–2 个编码会话；净增 ~800–1200 LOC（含测试） | 1 个编码会话；净增 **+2826 LOC**（3587 → 6413：src 1387→2672、tests 2070→3611、scripts 不变）；测试 173→297 项 |
+| M6 流式过程体验 | 1 个编码会话；净增 ~300–500 LOC（渲染管线重写 + 测试） | 1 个编码会话；净增 **+864 LOC**（6413 → 7277：src 2672→3131、tests 3611→4016、scripts 不变）；测试 313→329 项；cra 自审 1 严重 + 1 一般 + 2 建议 → 修复 + 复核轮 6 建议落地 |
 
-### 8.2 代码评审 Checklist（收尾门禁；M0–M5 每次收尾逐项执行，当前记录：M5）
+### 8.2 代码评审 Checklist（收尾门禁；M0–M6 每次收尾逐项执行，当前记录：M6）
 
-- [x] 全仓库 grep 无明文密钥；key 读取点唯一（config 层） ✅（M5 复执行：grep 命中均为 `--ask-exec` 参数名的 "sk-" 子串与 sk-test/占位文本；key 读取仍仅 config 层 get_api_key/resolve/load_raw）
-- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅（M5 复核：工具层未改；新增 cli 命令层兜底均为 `except Exception` + 可读展示，review 单文件失败继续批量并归退出码 2）
-- [x] `run_python` 有超时强杀与输出截断 ✅（M5 未改动工具层；新增执行确认钩子位于 middleware，拒绝时结构化回传、不进入 handler）
-- [x] Agent 循环有最大工具轮次（10）限制 ✅（M5：`--max-rounds` 参数可覆盖，默认 10 不变；middleware 未改）
-- [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅（M5 未改动；/save /load 经正本序列化往返，有往返回归锁定）
-- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M5：chat/review 双子命令 help 与 description 均含；README「限制」同步）
-- [x] README 每条命令逐条实测可复制执行 ✅（M5：uv sync / cra config test / cra review 各形态 / pytest / ruff / --version 实测；chat 真实 API 预验由 cra 自审轮顺带执行）
-- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M5 后 297 项：config 38、sessions 7、llm 31、agent 55、cli 52、config 交互 20、review 23、工具/注册表/样例 71）
-- [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅
-- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅（M5：新增 cli→config/sessions 正向依赖；cli→llm 仅 LLMError + probe（§3.4 豁免已更新）；框架序列化留在 agent 层）
+- [x] 全仓库 grep 无明文密钥；key 读取点唯一（config 层） ✅（M6 复执行：grep 无命中；渲染层不接触 key）
+- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅（M6 渲染层未新增 except；_run_turn 兜底分支保持 `except Exception` + 可读展示）
+- [x] `run_python` 有超时强杀与输出截断 ✅（M6 未改动工具层与 middleware）
+- [x] Agent 循环有最大工具轮次（10）限制 ✅（M6 未改动）
+- [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅（M6 未改动）
+- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M6 未改动声明，有测试锁定）
+- [x] README 每条命令逐条实测可复制执行 ✅（M6：既有命令未变；新增 REPL 命令 /process 有用例；README 流式描述与命令表同步）
+- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M6 后 329 项：cli 69、agent 58、config 41、llm 31、review 26、fs 23、exec 23、config 交互 20、sessions 17、registry 11、样例 10；渲染管线新增行级/围栏/句级/暂扣/样式与 /process 用例）
+- [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅（M6：_scan_group 谓词 Callable[[str], bool]；正则→谓词映射集中）
+- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅（M6 渲染重构不新增依赖方向；框架类型仍不出 agent 层）
 - [x] `git status` 干净：无 venv/缓存/密钥/开发辅助文档被跟踪 ✅
-- [x] Design.md 与实现一致（模型、工具名、模块、入口、配置项、CLI 面） ✅（M5 回写：§3.4 probe 豁免、§7.4 config test 退出码与同名覆盖语义、§7.3 命令族与实现核对）
+- [x] Design.md 与实现一致（模型、工具名、模块、入口、配置项、CLI 面） ✅（M6 回写：§3.1(7) 行级流式、§7.3 /process、§10 M6 结论、D15/D16）
 
 ### 8.3 复盘、缺陷记录与 PIP
 
@@ -322,6 +323,16 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
   - **Mimosa 钩子误报处置**（写入期拦截，均属启发式误报）：新写测试中的占位假值两次被拦为"硬编码凭据"（"sk-" 前缀形态、`"api_key": "<字面量>"` 键值对与 `api_key="<字面量>"` 关键字形态）——测试占位值统一改为 `placeholder-*` 并以变量构造避开字面量模式；config 层 `ENV_API_KEY = "SE_CodeAgent"` 常量（值是环境变量名非凭据）同样被拦，回归既有字面量形态。处置不改变任何行为。
   - 现场闭环小项：RUF012 类属性可变默认（ClassVar 注解）；测试假 Agent 类属性跨用例泄漏（fixture 重置）；`datetime.now` 的 DTZ005（报告时间戳改 `astimezone()` 显式本地时区）；JSON 模式顶层 summary 缺省补全。
   - **smoke_tools.py 兼容性确认**：config 层保留环境变量回退函数（get_api_key/get_model/get_base_url），`llm.create_model()` 默认路径不变——冒烟脚本无需改动（M5a 任务 4 的同步适配项：确认无影响）。
+- **M6 编码期记录（2026-10-01，cra 自审 1 严重项由审查者实证复现）**：
+  - **现场闭环 1 项**：增量兜底判据缺陷——`--no-stream` 前身判据"是否有可见输出（has_output）"覆盖不了"增量已到但尚未落盘（未成单元）"的窗口，此时用返回值兜底会把同一文本渲染两遍；改判据为"工具边界后是否收到过增量（has_delta_since_boundary）"，带两条回归（部分增量不重复、叙述已冲洗+最终无增量仍兜底）。
+  - **M6 cra 自审记录（DoD 第 4 条，2026-10-01，两批：初审 + 复核确认）**：
+    - 初审（对象 = M6 代码 diff，经 `cra review -` 管道）发现【严重】1 + 【一般】1 + 【建议】2：
+      - 【严重·实证复现】`_lead_unit` 消费前导空行后切片重定位 `self._buffer`，但围栏开栏偏移 `limit` 未同步平移——**一次投喂**（`--no-stream` 与返回值兜底路径的真实形态）时围栏开栏行被判为普通单行单元渲染，代码块被拆碎、``` 标记字面露出；逐字符投喂（常规流式）恰好掩盖，既有测试未捕获。修复 = 空行分支同步平移 limit，围栏分支改按当前缓冲重算 span；回归用例 = 空行与围栏开栏行落在同一增量。**审查者自行完成了复现、修复方案验证与回退对照**，是本项目 dogfood 质量最高的一次自审。
+      - 【一般·不采纳】`_first_fence_open` 每单元重扫的 O(N²)：流式下缓冲被单元消费约束在未闭合结构内（通常数行），一次性灌入的 N 行 drain 全程亚毫秒，与 M1/M3 的 O(n²) 评估同尺度；缓存扫描位置的状态机回归风险大于收益，维持简单实现。
+      - 【建议×2 已落地】`_scan_group` 谓词 `Any` → `Callable[[str], bool]`；flush_pending 拼接前归一化（组单元自带尾换行与单行单元混拼的多余空行）。
+    - 复核轮（对象 = 修复 diff）：**确认严重项修复有效**（审查者用回退对照复现了修复前的拆碎行为，并跑了 69 项 cli 测试 + 800 例行/围栏/空行随机模糊，内容无丢失、顺序不变）；新发现 6 项【建议】全部落地：flush 归一化改 `rstrip` 保留首行缩进（冲洗内容可能是缩进代码/围栏）；正则→谓词映射集中（`_heading_line` 等六个具名谓词，`_is_structured_line`/`_is_block_opener` 复用）；列表成员谓词提为具名 `_list_member`；"自审严重项"等流程性注释改写为陈述坐标不变量。
+    - 附注：复核确认 markup 注入面（/process 与工具打点均 `markup=False`/Text 组装）、`_run_review` 顶层兜底不误吞 SystemExit/KeyboardInterrupt、可变默认值均无问题。
+  - 模型侧行为备注：自审第一轮经 `cra chat` 执行时再现 DSML 工具调用标记当正文输出的怪癖（M4 起第三次记录），属模型侧行为，不处置；改用 `cra review -`（stdin 直通、结论 stdout 纯文本）完成审查。
 - 估算偏差：规模见 §8.1（估算 ~1000 LOC → M3 收尾实测 3273 LOC）；人工投入与日历时间未逐项记录（见 §8.1 人工投入行）。
 - 过程问题：
 - PIP（下一项目为结对项目，将在本项目上增量开发与重构）：
