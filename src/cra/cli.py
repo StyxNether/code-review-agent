@@ -142,11 +142,8 @@ def _fence_span(text: str) -> tuple[int, int] | None:
 def _is_structured_line(line: str) -> bool:
     """行是否属于完整性组（列表/表格/引用/围栏/缩进代码）的成员或块首。"""
     return bool(
-        _LIST_RE.match(line)
-        or _TABLE_RE.match(line)
-        or _QUOTE_RE.match(line)
-        or _FENCE_RE.match(line)
-        or _INDENTED_RE.match(line)
+        _LIST_RE.match(line) or _table_line(line) or _quote_line(line)
+        or _fence_line(line) or _indented_line(line)
     )
 
 
@@ -156,27 +153,37 @@ def _is_block_opener(line: str) -> bool:
     列表组的成员判定用"非块首"——连续列表项与懒续行（如紧跟问题描述的
     修改建议行）都留在同一组内整组渲染。
     """
-    return bool(
-        _HEADING_RE.match(line)
-        or _TABLE_RE.match(line)
-        or _QUOTE_RE.match(line)
-        or _FENCE_RE.match(line)
-    )
+    return bool(_heading_line(line) or _table_line(line) or _quote_line(line) or _fence_line(line))
+
+
+def _heading_line(line: str) -> bool:
+    """ATX 标题行判定。"""
+    return _HEADING_RE.match(line) is not None
 
 
 def _table_line(line: str) -> bool:
-    """表格组成员判定。"""
+    """表格行判定。"""
     return _TABLE_RE.match(line) is not None
 
 
 def _quote_line(line: str) -> bool:
-    """引用组成员判定。"""
+    """引用行判定。"""
     return _QUOTE_RE.match(line) is not None
 
 
+def _fence_line(line: str) -> bool:
+    """围栏开/闭栏行判定。"""
+    return _FENCE_RE.match(line) is not None
+
+
 def _indented_line(line: str) -> bool:
-    """缩进代码组成员判定。"""
+    """缩进代码行判定。"""
     return _INDENTED_RE.match(line) is not None
+
+
+def _list_member(line: str) -> bool:
+    """列表组成员判定：非块首行（其他列表项与懒续行均留在组内）。"""
+    return not _is_block_opener(line)
 
 
 def _sentence_cut(tail: str) -> int | None:
@@ -311,9 +318,11 @@ class _StreamingMarkdown:
         回答堆叠。围栏状态不必跨冲洗保留——冲洗即消息边界，后续文本重新
         从围栏外开始（缓冲内未闭合围栏随平文输出，不影响下一条消息）。
         """
-        parts = [text.strip() for text, _ in self._held if text.strip()]
+        # rstrip 只归一尾部（组单元自带尾换行、单行单元没有，混拼会多出空行），
+        # 保留首行缩进——冲洗内容可能是缩进代码组或围栏内容
+        parts = [text.rstrip() for text, _ in self._held if text.strip()]
         if self._buffer.strip():
-            parts.append(self._buffer.strip())
+            parts.append(self._buffer.rstrip())
         self._held.clear()
         self._buffer = ""
         if not parts:
@@ -367,13 +376,15 @@ class _StreamingMarkdown:
         buffer = self._buffer
         if not buffer.strip():
             return None
-        open_at = _first_fence_open(buffer)
+        open_at = _first_fence_open(buffer)  # 开栏偏移，作为 _lead_unit 的扫描上限
         unit = self._lead_unit(open_at)
         if unit is not None:
             return unit
         if open_at is None:
             return self._sentence_unit()
-        buffer = self._buffer  # _lead_unit 可能已消费前导空行，围栏分支用当前缓冲
+        # 此处 open_at 的偏移可能已因 _lead_unit 消费前导空行而失位——
+        # span 一律基于当前 self._buffer 重算，不沿用旧坐标
+        buffer = self._buffer
         span = _fence_span(buffer)
         if span is None:
             return None  # 围栏未闭合：从开栏行起扣住（完整性保护）
@@ -381,7 +392,11 @@ class _StreamingMarkdown:
         return buffer[span[0] : span[1]]
 
     def _lead_unit(self, limit: int | None) -> str | None:
-        """取围栏之前（limit 为开栏偏移，无围栏为 None）的首个正文单元。"""
+        """取围栏之前（limit 为开栏偏移，无围栏为 None）的首个正文单元。
+
+        空行只会出现在围栏开栏行之前：消费空行的切片使缓冲起点前移，
+        limit 必须同步平移，否则围栏行会被误判成普通单元（围栏被拆碎）。
+        """
         buffer = self._buffer
         offset = 0
         while True:
@@ -393,7 +408,7 @@ class _StreamingMarkdown:
                 step = newline + 1
                 self._buffer = buffer = buffer[step:]  # 空行=段落边界
                 if limit is not None:
-                    limit -= step  # 空行只出现在围栏前，坐标随切片同步平移（自审严重项）
+                    limit -= step
                 self._pending_break = True
                 offset = 0
                 continue
@@ -417,7 +432,7 @@ class _StreamingMarkdown:
         if _HEADING_RE.match(first):
             return first, line_end  # ATX 标题自成一单元
         if _LIST_RE.match(first):
-            return self._scan_group(buffer, offset, limit, lambda line: not _is_block_opener(line))
+            return self._scan_group(buffer, offset, limit, _list_member)
         if _TABLE_RE.match(first):
             return self._scan_group(buffer, offset, limit, _table_line)
         if _QUOTE_RE.match(first):
