@@ -10,7 +10,8 @@ import getpass
 import json
 import re
 import sys
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _package_version
@@ -36,6 +37,19 @@ _VALID_SEVERITIES = ("严重", "一般", "建议")
 _MAX_REVIEW_LINES = 2000  # 单文件嵌入 prompt 的行数上限：防超大文件 token 爆炸（超出截断并明示）
 _DEFAULT_EXPORT_NAME = "cra-export.md"
 
+# ---- M6 渲染管线（D15）：行级单元流式的结构识别与阈值 ----
+_SENTENCE_FLUSH_CHARS = 60  # 句级早发阈值：无结构长行的待发字符数
+_HOLDBACK_UNITS = 2  # 分类窗口：工具结果后暂扣的单元数，第 2 个到达即解除（D15）
+_CJK_SENTENCE_CHARS = "。！？；"
+_ASCII_SENTENCE_CHARS = ".!?;"
+_LIST_RE = re.compile(r"^\s*([-*+]|\d{1,9}[.)])\s")
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
+_TABLE_RE = re.compile(r"^\s*\|")
+_QUOTE_RE = re.compile(r"^\s*>")
+_INDENTED_RE = re.compile(r"^ {4}")
+_PROCESS_ARGS_PREVIEW = 200  # /process 重放的工具参数预览长度
+_PROCESS_RESULT_PREVIEW = 400  # /process 重放的工具结果预览长度
+
 _REPL_HELP = """\
 REPL 内置命令：
   /help                          显示本帮助
@@ -46,6 +60,7 @@ REPL 内置命令：
   /undo                          作废上一轮对话
   /context                       显示 token 用量与距截断阈值的余量
   /export [文件]                 导出最近一轮结论为 Markdown（默认 cra-export.md）
+  /process                       显示最近一轮的过程明细（叙述/工具调用/结果预览）
   /confirm [on|off]              run_python 执行前逐次确认（默认 off）
   exit 或 Ctrl+C                 退出
 其余 /xxx 按普通文本发送给模型。"""
@@ -83,6 +98,92 @@ def _in_fence(text: str) -> bool:
     for line in text.split("\n"):
         state = _fence_toggle(line, state)
     return state is not None
+
+
+def _complete_lines(text: str) -> Iterator[tuple[int, str]]:
+    """迭代 text 中的完整行（以换行结束），产出 (起始偏移, 行内容)。
+
+    末尾没有换行的残行不产出——行级单元只由完整行构成，残行留给句级
+    早发或 finish 收尾处理。
+    """
+    start = 0
+    while (newline := text.find("\n", start)) != -1:
+        yield start, text[start:newline]
+        start = newline + 1
+
+
+def _first_fence_open(text: str) -> int | None:
+    """首个围栏开栏行的偏移；缓冲没有围栏时返回 None。"""
+    state: tuple[str, int] | None = None
+    for at, line in _complete_lines(text):
+        nxt = _fence_toggle(line, state)
+        if state is None and nxt is not None:
+            return at
+        state = nxt
+    return None
+
+
+def _fence_span(text: str) -> tuple[int, int] | None:
+    """首个完整围栏的 (开栏偏移, 闭栏行结束偏移)；未闭合返回 None。"""
+    state: tuple[str, int] | None = None
+    open_at: int | None = None
+    for at, line in _complete_lines(text):
+        nxt = _fence_toggle(line, state)
+        if state is None and nxt is not None:
+            if open_at is None:
+                open_at = at
+        elif state is not None and nxt is None:
+            assert open_at is not None  # 闭栏必有在先的开栏（状态机不变量）
+            return open_at, at + len(line) + 1
+        state = nxt
+    return None
+
+
+def _is_structured_line(line: str) -> bool:
+    """行是否属于完整性组（列表/表格/引用/围栏/缩进代码）的成员或块首。"""
+    return bool(
+        _LIST_RE.match(line)
+        or _TABLE_RE.match(line)
+        or _QUOTE_RE.match(line)
+        or _FENCE_RE.match(line)
+        or _INDENTED_RE.match(line)
+    )
+
+
+def _is_block_opener(line: str) -> bool:
+    """是否为会开启新完整性块的行（即终止当前组）：标题/表格/引用/围栏。
+
+    列表组的成员判定用"非块首"——连续列表项与懒续行（如紧跟问题描述的
+    修改建议行）都留在同一组内整组渲染。
+    """
+    return bool(
+        _HEADING_RE.match(line)
+        or _TABLE_RE.match(line)
+        or _QUOTE_RE.match(line)
+        or _FENCE_RE.match(line)
+    )
+
+
+def _sentence_cut(tail: str) -> int | None:
+    """残行中第一个可安全切断的句界偏移（切点含句读字符本身）；无则 None。
+
+    完整性守卫（D15）：行内代码（反引号配对计数为奇）内部的句读不是句界；
+    ASCII 句读须后随空白或行尾——`a.py:10`、`3.14` 这类点分路径/小数不被
+    当作句界，中文句读（。！？；）无此要求。
+    """
+    backticks = 0
+    for index, char in enumerate(tail):
+        if char == "`":
+            backticks += 1
+            continue
+        if char not in _CJK_SENTENCE_CHARS and char not in _ASCII_SENTENCE_CHARS:
+            continue
+        if backticks % 2:
+            continue
+        if char in _ASCII_SENTENCE_CHARS and index + 1 < len(tail) and tail[index + 1] not in " \t":
+            continue
+        return index + 1
+    return None
 
 
 def _short(text: str, limit: int = _TOOL_ARGS_PREVIEW_LIMIT) -> str:
@@ -128,10 +229,21 @@ def _print_config_guide(console: Console) -> None:
 
 
 class _StreamingMarkdown:
-    """§3.1 流式渲染：已完成的段落用 rich Markdown 逐段打印，终块在流结束时渲染。
+    """§3.1 流式渲染（M6，D15）：行级单元流式 + 句级早发 + 过程/正文暂扣分类。
 
-    不使用 rich.Live（Windows 传统控制台下 Live 重绘不可靠）。
-    段落切分避开 ``` 围栏内部，防止代码块被空行拆碎。
+    渲染粒度从段落批渲染细化为"可安全落盘的单元"即时渲染：
+    - 单元 = 单行正文（Markdown 渲染、标记着色）或完整性组（围栏/列表/表格/
+      引用/缩进代码整组渲染、中间不切段；组等待终止行——空行、其他块首或
+      围栏行——到达才落盘，rich 逐条打印列表项会因块边距插入空行，实证）；
+    - 句级早发：无结构长行（≥ _SENTENCE_FLUSH_CHARS）在句界提前落盘，不等
+      换行（守卫见 _sentence_cut）；
+    - 过程/正文分类沿用 flush 机制（M4）：工具打点前的缓冲文本按暗色平文
+      落盘为过程叙述。分类窗口 = 工具结果后的首个单元——此刻无法预知该消息
+      是下一轮叙述还是最终回答，暂扣至第二个单元到达再落盘（过程叙述实测
+      通常单行，M4 验收记录），避免单行叙述以正文样式抢先显示。
+
+    追加式打印，不使用 rich.Live（D5 边界复核结论见 D15：Live 仅在需要重绘
+    已打印内容时才有必要）。
     """
 
     def __init__(self, console: Console) -> None:
@@ -139,67 +251,200 @@ class _StreamingMarkdown:
         self._buffer = ""
         self._has_output = False
         self._pending_break = False
+        self._provisional = True  # 分类窗口：一轮开始/工具结果后置位，第二单元到达解除
+        self._held: list[tuple[str, bool]] = []  # 暂扣单元（文本, 落盘时是否前置空行）
+        self._delta_since_boundary = False  # 工具边界后是否收到过增量（兜底渲染判据）
 
     @property
-    def has_output(self) -> bool:
-        """本轮是否已有任何可见输出（增量或冲洗的叙述）。"""
-        return self._has_output
+    def has_delta_since_boundary(self) -> bool:
+        """最近一次工具边界（打点/结果/叙述冲洗）之后是否收到过文本增量。
+
+        _run_turn 的兜底判据：收到过就不再 feed 返回值——否则短回答（不构成
+        单元的增量已在缓冲）会被返回值重复渲染。旧判据 has_output 覆盖不了
+        "增量已到但未落盘"的窗口（M6 现场修复的重复渲染缺陷）。
+        """
+        return self._delta_since_boundary
 
     def mark_break(self) -> None:
-        """在下一个段落前插入空行（工具打点与正文之间留出呼吸空间）。"""
+        """工具结果边界：下个正文单元前留空行，并重置分类窗口。"""
         self._pending_break = True
+        self._provisional = True
+        self._delta_since_boundary = False
 
     def feed(self, delta: str) -> None:
-        """接收一条文本增量，把其中已完成的段落渲染出去。"""
+        """接收一条文本增量，把其中可安全落盘的单元渲染出去。"""
         self._buffer += delta
-        while True:
-            split_at = self._paragraph_end()
-            if split_at == -1:
-                return
-            segment, self._buffer = self._buffer[:split_at], self._buffer[split_at + 2 :]
-            self._print_segment(segment)
+        self._delta_since_boundary = True
+        self._drain()
 
     def finish(self) -> None:
-        """流结束后渲染终块（最后一段）；中断/报错时也已收到的部分可见。"""
-        if self._buffer.strip():
-            self._print_segment(self._buffer)
-        self._buffer = ""
+        """流结束：解除暂扣、渲染残余（未闭合组/围栏与无换行尾行）。
 
-    def flush_pending(self) -> None:
-        """把缓冲中未成段的文本按暗色平文落盘（工具轮伴随叙述的分流）。
-
-        过程性叙述通常不构成完整段落（无空行），若只等段落完成会跨工具轮累积、
-        与最终回答一起在流结束时批量出现（M4 验收反馈）；在工具打点前冲洗，叙述
-        即实时跟随其轮次显示。平文暗色：过程文本不作 Markdown 渲染、与正文区分。
+        中断/报错时同样执行——已收到的部分保持可见。
         """
-        if self._buffer.strip():
-            if self._has_output or self._pending_break:
-                self._console.print()
-            self._console.print(self._buffer.strip(), style="dim", markup=False, highlight=False)
-            self._has_output = True
-        self._buffer = ""
+        self._release_held()
+        self._drain()
+        rest, self._buffer = self._buffer, ""
+        if rest.strip():
+            self._print_unit(rest)
 
-    def _paragraph_end(self) -> int:
-        """下一个不在围栏内的空行（双换行）位置；没有则返回 -1。
+    def flush_pending(self) -> str | None:
+        """工具打点前把缓冲中的过程叙述按暗色平文落盘（M4 分流机制的延续）。
 
-        围栏判定用行级状态机（``` / ~~~ / 更长的围栏均识别），
-        替换早先 count("```") 奇偶法对非标准围栏的漏判。
+        返回冲洗的文本（供 /process 过程记录）；无内容返回 None。暂扣单元与
+        缓冲一并冲洗：叙述不完整成段也要实时跟随其工具轮显示，不得与最终
+        回答堆叠。围栏状态不必跨冲洗保留——冲洗即消息边界，后续文本重新
+        从围栏外开始（缓冲内未闭合围栏随平文输出，不影响下一条消息）。
         """
-        index = self._buffer.find("\n\n")
-        while index != -1:
-            if not _in_fence(self._buffer[:index]):
-                return index
-            index = self._buffer.find("\n\n", index + 1)
-        return -1
+        parts = [text for text, _ in self._held]
+        if self._buffer.strip():
+            parts.append(self._buffer)
+        self._held.clear()
+        self._buffer = ""
+        if not parts:
+            return None
+        text = "\n".join(parts)
+        self._console.print(text, style="dim", markup=False, highlight=False)
+        self._has_output = True
+        self._pending_break = True
+        self._provisional = True
+        self._delta_since_boundary = False
+        return text
 
-    def _print_segment(self, text: str) -> None:
+    def _drain(self) -> None:
+        """渲染循环：缓冲中的单元逐个落盘；分类窗口内先暂扣（D15）。"""
+        while True:
+            unit = self._next_unit()
+            if unit is None:
+                return
+            if self._provisional:
+                self._held.append((unit, self._pending_break))
+                self._pending_break = False
+                if len(self._held) >= _HOLDBACK_UNITS:
+                    self._release_held()
+            else:
+                self._print_unit(unit)
+
+    def _release_held(self) -> None:
+        """解除暂扣：按到达顺序落盘（空行标记以暂扣时刻为准）。"""
+        held, self._held = self._held, []
+        for text, blank in held:
+            self._pending_break = blank
+            self._print_unit(text)
+        self._provisional = False
+
+    def _print_unit(self, text: str) -> None:
         if not text.strip():
             return
-        if self._has_output or self._pending_break:
-            self._console.print()  # 段落之间空一行（M1 验收反馈：避免文字堆叠）
+        if self._pending_break:
+            self._console.print()  # 段落/工具边界后留空行（M1 验收反馈：避免文字堆叠）
+            self._pending_break = False
         self._render_lines(text)
         self._has_output = True
-        self._pending_break = False
+
+    def _next_unit(self) -> str | None:
+        """从缓冲取出下一个可安全落盘的单元；无可发内容返回 None。
+
+        缓冲恒从围栏外开始（围栏单元整体消费，空行/单行/分组单元不含围栏
+        行），围栏扫描只需从缓冲头部做一遍状态机。优先级：围栏前导内容 →
+        围栏单元 → 句级早发。
+        """
+        buffer = self._buffer
+        if not buffer.strip():
+            return None
+        open_at = _first_fence_open(buffer)
+        unit = self._lead_unit(open_at)
+        if unit is not None:
+            return unit
+        if open_at is None:
+            return self._sentence_unit()
+        span = _fence_span(buffer)
+        if span is None:
+            return None  # 围栏未闭合：从开栏行起扣住（完整性保护）
+        self._buffer = buffer[span[1] :]
+        return buffer[span[0] : span[1]]
+
+    def _lead_unit(self, limit: int | None) -> str | None:
+        """取围栏之前（limit 为开栏偏移，无围栏为 None）的首个正文单元。"""
+        buffer = self._buffer
+        offset = 0
+        while True:
+            newline = buffer.find("\n", offset)
+            if newline == -1 or (limit is not None and offset >= limit):
+                return None  # 完整行耗尽（残行交给句级早发/finish）
+            line = buffer[offset:newline]
+            if not line.strip():
+                self._buffer = buffer = buffer[newline + 1 :]  # 空行=段落边界
+                self._pending_break = True
+                offset = 0
+                continue
+            unit, consumed = self._classify_unit(buffer, offset, limit)
+            if unit is None:
+                return None  # 组不完整：等终止行（围栏/空行/其他块首）
+            self._buffer = buffer[consumed:]
+            return unit
+
+    def _classify_unit(
+        self, buffer: str, offset: int, limit: int | None
+    ) -> tuple[str | None, int]:
+        """按首行类别切出单元：结构组（整组）或单行。组未终止返回 (None, 现偏移)。
+
+        列表整组（连续项 + 懒续行）而不是逐项——逐项打印会被 rich 的列表块
+        边距插入空行，破坏既有紧凑观感；表格/引用/缩进代码同理按整组渲染。
+        """
+        newline = buffer.find("\n", offset)
+        first = buffer[offset:newline]
+        line_end = newline + 1
+        if _HEADING_RE.match(first):
+            return first, line_end  # ATX 标题自成一单元
+        if _LIST_RE.match(first):
+            return self._scan_group(
+                buffer, offset, limit, lambda l: not _is_block_opener(l)
+            )
+        if _TABLE_RE.match(first):
+            return self._scan_group(buffer, offset, limit, _TABLE_RE.match)
+        if _QUOTE_RE.match(first):
+            return self._scan_group(buffer, offset, limit, _QUOTE_RE.match)
+        if _INDENTED_RE.match(first):
+            return self._scan_group(buffer, offset, limit, _INDENTED_RE.match)
+        return first, line_end  # 普通行/标记行：单行单元
+
+    def _scan_group(
+        self, buffer: str, offset: int, limit: int | None, member: Any
+    ) -> tuple[str | None, int]:
+        """从 offset 起收集连续组成员，直到终止行；组未终止（缓冲耗尽且无
+        终止行）返回 None——整组等待，避免列表/表格被打印边界拆开。"""
+        end = offset
+        while True:
+            newline = buffer.find("\n", end)
+            if newline == -1:
+                return None, end
+            if limit is not None and end >= limit:
+                break  # 围栏行本身即终止行，留在缓冲交给围栏处理
+            line = buffer[end:newline]
+            if not line.strip() or not member(line):
+                break  # 空行/其他块首终止；空行留待主循环消费
+            end = newline + 1
+        return buffer[offset:end], end
+
+    def _sentence_unit(self) -> str | None:
+        """句级早发（D15）：无结构长行超过阈值后在句界提前落盘，不等换行。"""
+        if self._provisional:
+            return None
+        buffer = self._buffer
+        complete_end = buffer.rfind("\n") + 1
+        tail = buffer[complete_end:]
+        if len(tail) < _SENTENCE_FLUSH_CHARS:
+            return None
+        complete = buffer[:complete_end]
+        last_complete = complete[:-1].rpartition("\n")[2] if complete else ""
+        if _is_structured_line(tail) or _is_structured_line(last_complete):
+            return None  # 列表/表格等结构的不完整尾行不切（完整性优先）
+        cut = _sentence_cut(tail)
+        if cut is None:
+            return None
+        self._buffer = buffer[:complete_end] + tail[cut:]
+        return tail[:cut]
 
     def _render_lines(self, text: str) -> None:
         """逐行分级渲染（M2 验收反馈：分级标记着色、修改建议加粗）。
@@ -264,23 +509,43 @@ class _StreamingMarkdown:
         return rendered
 
 
-def _run_turn(agent: Agent, console: Console, user_input: str, *, no_stream: bool) -> str | None:
+def _run_turn(
+    agent: Agent,
+    console: Console,
+    user_input: str,
+    *,
+    no_stream: bool,
+    process_events: list[tuple[str, str]],
+) -> str | None:
     """执行一轮对话：工具调用打点、最终回答流式渲染、中断与请求错误兜底。
 
     返回本轮最终文本（供 /export 记录最近一轮结论）；中断或失败返回 None。
+    process_events 就地追加本轮过程事件（叙述/工具/结果），供 /process 重放。
     no_stream 时不接收增量，待 run 返回后整体渲染（§7.2 --no-stream）。
     """
     streamer = _StreamingMarkdown(console)
 
     def on_tool(name: str, args: str) -> None:
-        streamer.flush_pending()  # 过程性叙述先于工具打点落盘，不再与最终回答堆叠
-        console.print(f"⚙ {name}({_short(args)})", style="dim", markup=False, highlight=False)
+        flushed = streamer.flush_pending()  # 过程性叙述先于工具打点落盘，不再与最终回答堆叠
+        if flushed:
+            process_events.append(("narration", flushed))
+        process_events.append(("tool", f"{name}({_short(args, _PROCESS_ARGS_PREVIEW)})"))
+        # 工具打点是三类内容的中层：图标 + 工具名着色（Text 组装，防 markup 注入）
+        mark = Text()
+        mark.append("⚙ ", style="dim")
+        mark.append(name, style="bold cyan")
+        mark.append(f" ({_short(args)})", style="dim")
+        console.print(mark)
 
     def on_tool_result(result: str) -> None:
         if result.startswith(ERROR_PREFIX):
-            console.print("  ↳ 工具返回错误（已回传模型）", style="dim", markup=False)
+            console.print("  ↳ 工具返回错误（已回传模型）", style="red", markup=False)
+            process_events.append(("result", "工具返回错误（已回传模型）"))
         else:
             console.print(f"  ↳ 完成（{len(result)} 字符）", style="dim", markup=False)
+            preview = result[:_PROCESS_RESULT_PREVIEW]
+            suffix = "…" if len(result) > _PROCESS_RESULT_PREVIEW else ""
+            process_events.append(("result", preview + suffix))
         streamer.mark_break()
 
     try:
@@ -290,9 +555,11 @@ def _run_turn(agent: Agent, console: Console, user_input: str, *, no_stream: boo
             on_tool_result=on_tool_result,
             on_delta=None if no_stream else streamer.feed,
         )
-        if no_stream or (result and not streamer.has_output):
-            # --no-stream：整体渲染；兼容端点可能不产生文本增量：界面不能因此
-            # 空白，兜底渲染完整返回文本
+        if no_stream or (result and not streamer.has_delta_since_boundary):
+            # --no-stream：整体渲染；工具边界后无任何增量（兼容端点不产生文本
+            # 增量，或最终消息未流出增量）时用返回值兜底，界面不能空白——
+            # 判据是"边界后是否收到过增量"而非"是否有可见输出"：后者在增量
+            # 已到但尚未落盘（未成单元）时会误判，把返回值重复渲染（M6 修复）
             streamer.feed(result)
         return result
     except KeyboardInterrupt:
@@ -318,6 +585,7 @@ class _ReplState:
     no_stream: bool
     confirm_flag: dict[str, bool]  # 执行确认开关（闭包读取的可变共享，/confirm 切换）
     last_answer: str | None = None
+    last_process: list[tuple[str, str]] = field(default_factory=list)  # 最近一轮过程事件（/process）
 
 
 def _exec_confirm_callback(console: Console, flag: dict[str, bool]) -> ExecConfirmCallback:
@@ -477,6 +745,23 @@ def _cmd_export(state: _ReplState, filename: str) -> None:
     state.console.print(f"最近一轮结论已导出：{target.resolve()}", markup=False)
 
 
+def _cmd_process(state: _ReplState) -> None:
+    """/process（§7.3）：重放最近一轮的过程明细——真折叠不可行（D5 同因）下
+    的"紧凑摘要行 + 可选重放"方案（§10 M6）：打点保持紧凑，细节按需展开。"""
+    console = state.console
+    if not state.last_process:
+        console.print("最近一轮没有过程记录（该轮没有调用工具，或尚未开始对话）。", markup=False)
+        return
+    console.print("最近一轮过程明细：", markup=False)
+    for kind, payload in state.last_process:
+        if kind == "narration":
+            console.print(payload, style="dim", markup=False, highlight=False)
+        elif kind == "tool":
+            console.print(f"⚙ {payload}", markup=False)
+        else:
+            console.print(f"↳ {payload}", style="dim", markup=False, highlight=False)
+
+
 def _cmd_confirm(state: _ReplState, argument: str) -> None:
     """/confirm（§7.3）：run_python 执行确认开关；省略参数显示当前状态。"""
     arg = argument.lower()
@@ -518,6 +803,8 @@ def _handle_command(user_input: str, state: _ReplState) -> bool:
         _cmd_context(state)
     elif command == "/export":
         _cmd_export(state, argument)
+    elif command == "/process":
+        _cmd_process(state)
     elif command == "/confirm":
         _cmd_confirm(state, argument)
     else:
@@ -571,7 +858,11 @@ def _run_chat(
             return
         if _handle_command(user_input, state):
             continue
-        result = _run_turn(state.agent, console, user_input, no_stream=state.no_stream)
+        process_events: list[tuple[str, str]] = []
+        state.last_process = process_events
+        result = _run_turn(
+            state.agent, console, user_input, no_stream=state.no_stream, process_events=process_events
+        )
         if result is not None:
             state.last_answer = result
 
