@@ -18,6 +18,8 @@ from cra.cli import (
     _setup_hint,
     _StreamingMarkdown,
 )
+from cra.prompts import SYSTEM_PROMPT
+from cra.tools import ERROR_PREFIX
 
 
 class TestParser:
@@ -101,10 +103,13 @@ class _FakeAgent:
         self.turns.append(user_input)
         on_delta = kwargs.get("on_delta")
         on_tool = kwargs.get("on_tool")
+        on_tool_result = kwargs.get("on_tool_result")
         if on_delta is not None:
             on_delta("先看看文件再作答。")  # 工具轮伴随叙述(无段落空行)
         if on_tool is not None:
             on_tool("list_dir", "{}")
+        if on_tool_result is not None:
+            on_tool_result("目录内容")  # 真实 Agent 协议:结果回调必然触发
         if on_delta is not None:
             on_delta("最终回答正文。")
         return "最终回答正文。"
@@ -286,6 +291,78 @@ def test_no_delta_answer_falls_back_to_return_value(
     assert "无增量完整回答。" in capsys.readouterr().out
 
 
+class _PartialDeltaAgent:
+    """只发一条不成单元的增量(无换行)就返回的假 Agent。"""
+
+    def __init__(self, **_kwargs: Any) -> None:
+        self.model = "test-model"
+
+    def reset(self) -> None:
+        pass
+
+    def run(self, user_input: str, **kwargs: Any) -> str:
+        on_delta = kwargs.get("on_delta")
+        if on_delta is not None:
+            on_delta("简短回答。")
+        return "简短回答。"
+
+
+def test_partial_delta_not_duplicated_by_fallback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M6 兜底判据修复:增量已收到(尚在缓冲)时不得再用返回值重复渲染。"""
+    monkeypatch.setenv("SE_CodeAgent", "sk-test")
+    monkeypatch.setattr(cli, "Agent", _PartialDeltaAgent)
+    inputs = iter(["问", "exit"])
+    monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+    cli._run_chat()
+
+    assert capsys.readouterr().out.count("简短回答。") == 1
+
+
+class _NarrateOnlyAgent:
+    """工具轮有叙述增量、最终消息无增量的假 Agent(旧版端点行为)。"""
+
+    def __init__(self, **_kwargs: Any) -> None:
+        self.model = "test-model"
+
+    def reset(self) -> None:
+        pass
+
+    def run(self, user_input: str, **kwargs: Any) -> str:
+        on_delta = kwargs.get("on_delta")
+        if on_delta is not None:
+            on_delta("让我看看。")
+        if kwargs.get("on_tool") is not None:
+            kwargs["on_tool"]("list_dir", "{}")
+        if kwargs.get("on_tool_result") is not None:
+            kwargs["on_tool_result"]("ok")
+        return "最终结论。"
+
+
+def test_narration_then_silent_final_falls_back(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """叙述已冲洗、最终消息无增量:返回值兜底渲染最终回答(界面不空白)。"""
+    monkeypatch.setenv("SE_CodeAgent", "sk-test")
+    monkeypatch.setattr(cli, "Agent", _NarrateOnlyAgent)
+    inputs = iter(["问", "exit"])
+    monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+    cli._run_chat()
+
+    out = capsys.readouterr().out
+    assert "让我看看。" in out
+    assert "最终结论。" in out
+
+
+def test_system_prompt_guides_process_narration() -> None:
+    """D16:思考过程展示的替代方案——提示词引导工具前意图说明与审查计划。"""
+    assert "一句简短的话" in SYSTEM_PROMPT
+    assert "审查计划" in SYSTEM_PROMPT
+
+
 def test_all_markers_bolded_in_one_segment() -> None:
     """回归：三个标记都要替换，不能命中第一个就返回。"""
     text = "【一般】a.py:1 — x。\n【建议】a.py:2 — y。"
@@ -308,21 +385,38 @@ def test_markers_inside_code_fence_untouched() -> None:
     assert "\x1b[1;32m【建议】" in result
 
 
-def test_paragraph_end_skips_tilde_fence() -> None:
-    streamer = _StreamingMarkdown(Console())
-    streamer._buffer = "a\n\n~~~py\nx\n\ny\n~~~\n\nb"
+def test_fence_interior_held_until_closed() -> None:
+    """M6 行级流式：围栏未闭合前内容不落盘（完整性保护），闭合后整组渲染。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("看代码：\n```py\nx = 1\n")
+    assert "x = 1" not in console.export_text(clear=False)  # 未闭合：围栏内容扣住
+    streamer.feed("print(x)\n```\n之后正文")
+    out = console.export_text(clear=False)
+    assert "x = 1" in out and "print(x)" in out  # 闭合后整组出现
+    assert out.count("x = 1") == 1  # 只渲染一次，不重复
 
-    assert streamer._paragraph_end() == 1  # 第一个空行在围栏外
-    streamer._buffer = "~~~py\nx\n\ny\n~~~\n\nb"
-    assert streamer._paragraph_end() == 14  # 围栏内的空行不切段
+
+def test_tilde_fence_hold_and_interior_blank_lines() -> None:
+    """~~~ 围栏与围栏内部空行同样扣住（原段落切分的围栏保护语义，行级等价）。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("铺垫。\n")  # 先占住分类窗口的一个单元
+    streamer.feed("~~~py\nx\n\ny")
+    assert "x" not in console.export_text(clear=False)  # 未闭合不落盘
+    streamer.feed("\n~~~\n之后\n")
+    out = console.export_text(clear=False)
+    assert "x" in out and "y" in out and "之后" in out
 
 
-def test_paragraph_end_respects_longer_backtick_fence() -> None:
-    streamer = _StreamingMarkdown(Console())
-    # ```` 围栏内部的 ``` 不闭合围栏
-    streamer._buffer = "````md\nx\n\n```\n````\n\nb"
-
-    assert streamer._paragraph_end() == 18
+def test_longer_fence_not_closed_by_inner_short_fence() -> None:
+    """```` 围栏内部的 ``` 不闭合围栏（M2 回归的行级等价）。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("````md\nx\n\n```\n````\n\nb\n")
+    out = console.export_text(clear=False)
+    assert "x" in out and "b" in out
+    assert out.count("x") == 1  # 内部 ``` 未提前闭合围栏
 
 
 def test_in_fence_state() -> None:
@@ -330,6 +424,141 @@ def test_in_fence_state() -> None:
     assert _in_fence("```py\nx")
     assert not _in_fence("```py\nx\n```")
     assert _in_fence("~~~\nx\n```")  # 字符不同的围栏不互相闭合
+
+
+# ---- M6:行级单元流式、句级早发、暂扣分类与分层样式(Design.md D15/D16) ----
+
+
+def _stream_console() -> Console:
+    return Console(record=True, width=120, force_terminal=True, color_system="truecolor")
+
+
+def test_complete_lines_render_before_finish() -> None:
+    """行级粒度:完整行即时落盘,不等 finish——段落批渲染是 M4 验收的主投诉。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("第一行。\n第二行。\n")
+
+    out = console.export_text(clear=False)
+    assert "第一行。" in out and "第二行。" in out  # 未调 finish 已落盘
+
+    streamer.finish()
+    assert console.export_text(clear=False).count("第一行。") == 1  # finish 不重复渲染
+
+
+def test_first_unit_held_until_second_arrives() -> None:
+    """分类窗口(D15):边界后的首个单元暂扣,防止单行过程叙述以正文样式抢先显示。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("叙述单行。\n")
+    assert "叙述单行。" not in console.export_text(clear=False)  # 暂扣中
+
+    streamer.feed("第二行。\n")
+    out = console.export_text(clear=False)
+    assert "叙述单行。" in out and "第二行。" in out  # 第二单元到达即解除暂扣
+
+
+def test_sentence_flush_on_long_prose_line() -> None:
+    """句级早发:无结构长行超过阈值后在句界落盘,不等换行。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("先起个头。\n再铺垫一句。\n")  # 两个单元解除暂扣
+    streamer.feed("这一段没有换行但是" + "很长" * 40 + "的一句话。后半句还没写完")
+
+    assert "的一句话。" in console.export_text(clear=False)  # 句界已提前落盘
+    streamer.finish()
+    assert "后半句还没写完" in console.export_text(clear=False)
+
+
+def test_sentence_flush_skips_inline_code_interior() -> None:
+    """句界守卫:句读全在行内代码内部时不早发(`a.b` 的点不是句界)。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("先起个头。\n再铺垫一句。\n")
+    streamer.feed("检查 `" + "x." * 40 + "` 结束")
+
+    assert "x." not in console.export_text(clear=False)  # 句界全在代码内:不早发
+    streamer.finish()
+    assert "x." in console.export_text(clear=False)  # finish 整行渲染
+
+
+def test_list_group_renders_without_item_gaps() -> None:
+    """列表整组渲染:项与项之间无空行(逐项打印会被 rich 列表边距拆开,实证)。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("开头。\n- 甲\n- 乙\n\n后续。")
+
+    lines = [line for line in console.export_text(clear=False).splitlines() if line.strip()]
+    jia = next(i for i, line in enumerate(lines) if "甲" in line)
+    yi = next(i for i, line in enumerate(lines) if "乙" in line)
+    assert yi == jia + 1  # 两个列表项相邻
+
+
+def test_table_group_renders_as_table() -> None:
+    """表格整组渲染:出现 Markdown 表格制表线,而非逐行字面竖线。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("前文。\n| a | b |\n|---|---|\n| 1 | 2 |\n\n后文。")
+
+    assert "─" in console.export_text(clear=False)  # rich 表格框线
+
+
+def test_paragraph_blank_line_spacing_preserved() -> None:
+    """段落间空行(M1 验收反馈的既有行为)在行级流式下保持。"""
+    console = _stream_console()
+    streamer = _StreamingMarkdown(console)
+    streamer.feed("段一。\n\n段二。\n")
+
+    out = console.export_text()
+    assert "\n\n" in out[out.index("段一。") : out.index("段二。")]
+
+
+def test_tool_mark_and_error_result_styling() -> None:
+    """三类内容分层样式:工具名 cyan 加粗、错误结果行红色、最终回答照常渲染。"""
+    console = _stream_console()
+
+    class _ToolAgent:
+        def run(self, user_input: str, **kwargs: Any) -> str:
+            if kwargs.get("on_tool") is not None:
+                kwargs["on_tool"]("run_python", '{"code": "1/0"}')
+            if kwargs.get("on_tool_result") is not None:
+                kwargs["on_tool_result"](ERROR_PREFIX + "boom")
+            if kwargs.get("on_delta") is not None:
+                kwargs["on_delta"]("结论。")
+            return "结论。"
+
+    cli._run_turn(_ToolAgent(), console, "审查", no_stream=False, process_events=[])
+
+    out = console.export_text(styles=True)
+    assert "\x1b[1;36mrun_python" in out  # 工具名 bold cyan(与暗色叙述区分)
+    assert "\x1b[31m" in out  # 错误结果行红色
+    assert "结论。" in out
+
+
+def test_process_events_recorded_for_replay() -> None:
+    """_run_turn 就地记录过程事件(叙述/工具/结果),供 /process 重放。"""
+    console = _stream_console()
+    events: list[tuple[str, str]] = []
+
+    class _ToolAgent:
+        def run(self, user_input: str, **kwargs: Any) -> str:
+            if kwargs.get("on_delta") is not None:
+                kwargs["on_delta"]("让我看看。")
+            if kwargs.get("on_tool") is not None:
+                kwargs["on_tool"]("read_file", '{"path": "a.py"}')
+            if kwargs.get("on_tool_result") is not None:
+                kwargs["on_tool_result"]("内容")
+            if kwargs.get("on_delta") is not None:
+                kwargs["on_delta"]("结论。")
+            return "结论。"
+
+    cli._run_turn(_ToolAgent(), console, "审查", no_stream=False, process_events=events)
+
+    kinds = [kind for kind, _ in events]
+    assert kinds == ["narration", "tool", "result"]
+    assert "让我看看。" in events[0][1]
+    assert "read_file" in events[1][1]
+    assert events[2][1] == "内容"  # 结果事件存内容预览(重放价值高于字数摘要)
 
 
 class TestMarkerStyling:
@@ -446,9 +675,28 @@ class TestReplCommands:
         out = self._repl(monkeypatch, capsys, ["/help", "exit"])
 
         for keyword in (
-            "/help", "/clear", "/model", "/save", "/load", "/undo", "/context", "/export", "/confirm",
+            "/help", "/clear", "/model", "/save", "/load", "/undo", "/context", "/export",
+            "/process", "/confirm",
         ):
             assert keyword in out
+
+    def test_process_replays_last_turn_events(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """/process:最近一轮的叙述/工具/结果按序重放(可折叠的替代方案,§10 M6)。"""
+        out = self._repl(monkeypatch, capsys, ["审查", "/process", "exit"])
+
+        assert "过程明细" in out
+        assert "先看看文件再作答。" in out  # 叙述全文
+        assert "list_dir" in out  # 工具调用
+        assert "↳" in out  # 结果行
+
+    def test_process_without_history_hinted(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = self._repl(monkeypatch, capsys, ["/process", "exit"])
+
+        assert "没有过程记录" in out
 
     def test_save_then_load_roundtrip(
         self,
