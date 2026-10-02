@@ -8,7 +8,10 @@ LLMError 类型与 config test 专用的 probe 探测（§7.4，无 Agent 循环
 import argparse
 import getpass
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -37,6 +40,9 @@ _VALID_SEVERITIES = ("严重", "一般", "建议")
 _MAX_REVIEW_LINES = 2000  # 单文件嵌入 prompt 的行数上限：防超大文件 token 爆炸（超出截断并明示）
 _DEFAULT_EXPORT_NAME = "cra-export.md"
 _AUTOSAVE_NAME = "_last"  # 会话自动保留的固定存档名（§7.3 M7；/resume 的数据来源）
+# 卸载程序（§7.1/§10 M8）：uv 工具名与垫片所在目录
+_UNINSTALL_PACKAGE = "code-review-agent"
+_UV_BIN_DIRNAME = ".local/bin"  # uv 垫片目录（用户目录下），显示与 PATH 清理共用
 
 # ---- M6 渲染管线（D15）：行级单元流式的结构识别与阈值 ----
 _SENTENCE_FLUSH_CHARS = 60  # 句级早发阈值：无结构长行的待发字符数
@@ -55,10 +61,11 @@ _REPL_HELP = """\
 REPL 内置命令：
   /help                          显示本帮助
   /clear                         清空上下文（系统提示词保留）
-  /change model（别名 /model）    列出供应商与模型并切换（上下文保留）
-  /setting                       设置菜单（切模型/配置模型列表/存取会话/执行确认）
-  /save [名称]                   保存会话到 ~/.cra/sessions/<名称>.json
-  /load <名称>                   从文件恢复会话（整体替换当前会话）
+  /change model（别名 /model）    列出供应商与模型并切换（当前使用中有标记）
+  /setting                       设置菜单（切模型/配置/存取与删除会话/执行确认）
+  /save [名称]                   保存会话（省略名称自动以时间戳命名）
+  /load [名称]                   恢复会话（省略名称列出会话数字选择；加载后打印历史）
+  /delete                        删除会话（列表选择 + y/N 确认，_last 同样可删）
   /resume                        恢复最近一次自动保留的会话（_last）
   /undo                          作废上一轮对话
   /context                       显示 token 用量与距截断阈值的余量
@@ -650,23 +657,59 @@ def _model_label(resolved: config.ResolvedModel) -> str:
     return f"{resolved.provider}/{resolved.model}"
 
 
-def _resolve_or_exit(
+def _resolve_or_error(
     console: Console, model: str | None, provider: str | None
-) -> config.ResolvedModel:
-    """解析本次使用的模型连接；无配置打印引导、损坏打印错误，均退出 2（§5/§7.5）。"""
+) -> config.ResolvedModel | None:
+    """解析本次使用的模型连接；配置损坏打印可读错误后退出 2，无配置返回 None。
+
+    调用方仅 _run_chat（review 有自己的非交互路径，不走本函数）：返回 None 时
+    先走首次配置引导（M8），完成后仍无配置才指引退出 2（§5 修订）。
+    """
     try:
-        resolved = config.resolve(model=model, provider=provider)
+        return config.resolve(model=model, provider=provider)
     except config.ConfigError as exc:
         console.print(f"配置错误：{exc}", style="red", markup=False)
         sys.exit(2)
-    if resolved is None:
-        _print_config_guide(console)
-        sys.exit(2)
-    return resolved
+
+
+def _offer_first_run_setup(console: Console) -> None:
+    """首次配置引导（§5 M8）：chat 无任何可用配置时询问"是否现在配置"。
+
+    确认后按 添加供应商 → 设置默认模型 顺序复用 cra config 交互函数与
+    _ConfigSession（不重写逻辑）；任何一步取消都不阻断——完成后仍无配置由
+    调用方维持既有指引 + 退出 2。已有供应商清单（缺默认/key）不走向导，维持
+    既有指引语义。EOF/Ctrl+C 视为拒绝（管道场景不进入交互向导）。
+    """
+    try:
+        data = config.load_raw()
+    except config.ConfigError:
+        # 损坏配置不得被向导的 save 静默覆盖；当前调用顺序下 resolve 会先行
+        # 抛出同样的错误并退出 2，此处 return 是防调用顺序变化的护栏
+        return
+    if data.get("providers"):
+        return
+    console.print(
+        f"未找到任何可用配置：既无 {config.config_path()}，也未设置环境变量。",
+        markup=False,
+    )
+    answer = _ask("是否现在配置？(Y/n，回车 = 现在配置)：")
+    if answer is None or (answer and answer.lower() not in ("y", "yes")):
+        console.print("已跳过配置。", markup=False)
+        return
+    session = _ConfigSession(console, data)
+    console.print("第 1 步：添加供应商（可选预设或自定义，填入 API key）。", markup=False)
+    _config_add_provider(session)
+    if session.providers():
+        console.print("第 2 步：设置默认模型。", markup=False)
+        _config_set_default(session)
 
 
 def _cmd_change_model(state: _ReplState) -> None:
-    """/change model（§7.3）：列出供应商与模型清单、序号选择；切换后上下文保留。"""
+    """/change model（§7.3）：列出供应商与模型清单、序号选择；切换后上下文保留。
+
+    清单标注"当前使用中"（M8）：当前供应商与当前模型分别打标，流程本身不变
+    （先选供应商再选模型）。
+    """
     console = state.console
     try:
         data = config.load_raw()
@@ -677,9 +720,12 @@ def _cmd_change_model(state: _ReplState) -> None:
     if not providers:
         console.print("尚未配置任何供应商清单。请先运行 cra config 添加供应商与模型。", markup=False)
         return
+    current_provider = getattr(state.agent, "provider", None)
+    current_model = getattr(state.agent, "model", "")
     console.print("可用供应商：", markup=False)
     for index, entry in enumerate(providers, start=1):
-        console.print(f"  {index}. {entry['name']}　模型：{', '.join(entry['models'])}", markup=False)
+        mark = "（当前使用中）" if entry["name"] == current_provider else ""
+        console.print(f"  {index}. {entry['name']}　模型：{', '.join(entry['models'])}{mark}", markup=False)
     provider_index = _parse_index(_ask("选择供应商序号："), len(providers))
     if provider_index is None:
         console.print("无效序号，已取消切换。", markup=False)
@@ -688,7 +734,12 @@ def _cmd_change_model(state: _ReplState) -> None:
     models = entry["models"]
     console.print(f"供应商 '{entry['name']}' 的模型：", markup=False)
     for index, name in enumerate(models, start=1):
-        console.print(f"  {index}. {name}", markup=False)
+        mark = (
+            "（当前使用中）"
+            if entry["name"] == current_provider and name == current_model
+            else ""
+        )
+        console.print(f"  {index}. {name}{mark}", markup=False)
     model_index = _parse_index(_ask("选择模型序号："), len(models))
     if model_index is None:
         console.print("无效序号，已取消切换。", markup=False)
@@ -721,26 +772,104 @@ def _cmd_save(state: _ReplState, name: str) -> None:
     state.console.print(f"会话已保存：{path}（共 {len(data)} 条对话消息）", markup=False)
 
 
-def _cmd_load(state: _ReplState, name: str) -> None:
-    """/load（§7.3）：从会话文件整体替换当前会话；系统提示词保持当前版本。"""
-    if not name:
-        state.console.print("用法：/load <名称>（文件位于 ~/.cra/sessions/<名称>.json）", markup=False)
+def _list_session_names() -> list[str]:
+    """~/.cra/sessions/ 下现存会话名（*.json 去后缀，名称排序；_last 同样列出）。"""
+    directory = sessions.sessions_dir()
+    if not directory.exists():
+        return []
+    return sorted(item.stem for item in directory.glob("*.json"))
+
+
+def _choose_session(console: Console, names: list[str], label: str) -> str | None:
+    """会话数字选择：打印编号清单；回车、取消或非法序号返回 None（取消）。"""
+    for index, name in enumerate(names, start=1):
+        console.print(f"  {index}. {name}", markup=False)
+    index = _parse_index(_ask(f"{label}序号（回车取消）："), len(names))
+    if index is None:
+        return None
+    return names[index]
+
+
+def _print_session_history(console: Console, data: list[dict[str, Any]]) -> None:
+    """加载成功后打印全部会话历史（你>/cra> 前缀逐条，§7.3 M8）。
+
+    序列化形态为 agent 层 messages_to_dict（{"type","data":{"content"}}）；
+    工具结果随 cra> 前缀一并显示，保持"全部历史"语义。取值对非预期结构
+    设防（data 非法通常已被 load/messages 校验拦截，此处为最后护栏）。
+    """
+    if not data:
         return
+    console.print("会话历史：", markup=False)
+    for item in data:
+        prefix = "你>" if isinstance(item, dict) and item.get("type") == "human" else "cra>"
+        payload = item.get("data") if isinstance(item, dict) else None
+        content = str(payload.get("content") or "") if isinstance(payload, dict) else ""
+        console.print(f"{prefix} {content}".rstrip(), markup=False)
+
+
+def _cmd_load(state: _ReplState, name: str) -> None:
+    """/load（§7.3）：从会话文件整体替换当前会话；系统提示词保持当前版本。
+
+    M8：省略名称时列出会话数字选择（回车取消）；加载成功自动打印全部会话历史。
+    """
+    console = state.console
+    if not name:
+        names = _list_session_names()
+        if not names:
+            console.print(f"没有已保存的会话（目录 {sessions.sessions_dir()}）。", markup=False)
+            return
+        picked = _choose_session(console, names, "要加载的会话")
+        if picked is None:
+            console.print("已取消。", markup=False)
+            return
+        name = picked
     try:
         path = sessions.session_path(name)
     except ValueError as exc:
-        state.console.print(str(exc), markup=False)
+        console.print(str(exc), markup=False)
         return
     if not path.exists():
-        state.console.print(f"会话文件不存在：{path}", markup=False)
+        console.print(f"会话文件不存在：{path}", markup=False)
         return
     try:
         data = sessions.load_session(path)
         state.agent.load_session(data)
     except Exception as exc:  # noqa: BLE001 — 文件损坏/格式非法都转为可读提示，REPL 存活
-        state.console.print(f"会话加载失败：{exc}", markup=False)
+        console.print(f"会话加载失败：{exc}", markup=False)
         return
-    state.console.print(f"会话已加载：{path}（共 {len(data)} 条消息，当前会话已被整体替换）", markup=False)
+    console.print(f"会话已加载：{path}（共 {len(data)} 条消息，当前会话已被整体替换）", markup=False)
+    _print_session_history(console, data)
+
+
+def _cmd_delete(state: _ReplState) -> None:
+    """/delete（§7.3 M8）：删除已有会话——列表数字选择 + y/N 确认后删除文件。
+
+    `_last` 同样可删（删即清除自动保留存档）；确认默认 N 防误触发。
+    """
+    console = state.console
+    names = _list_session_names()
+    if not names:
+        console.print(f"没有可删除的会话（目录 {sessions.sessions_dir()}）。", markup=False)
+        return
+    name = _choose_session(console, names, "要删除的会话")
+    if name is None:
+        console.print("已取消。", markup=False)
+        return
+    try:
+        path = sessions.session_path(name)
+    except ValueError as exc:
+        console.print(str(exc), markup=False)
+        return
+    answer = _ask(f"确认删除会话 '{name}'？（y/N）")
+    if answer is None or answer.lower() not in ("y", "yes"):
+        console.print("已取消。", markup=False)
+        return
+    try:
+        path.unlink()
+    except OSError as exc:
+        console.print(f"删除失败：{exc}", markup=False)
+        return
+    console.print(f"会话已删除：{path}", markup=False)
 
 
 def _cmd_undo(state: _ReplState) -> None:
@@ -818,6 +947,7 @@ _SETTING_MENU = """\
   3) 保存会话
   4) 加载会话
   5) run_python 执行确认开关
+  6) 删除会话
   0) 返回对话（回车同效）"""
 
 
@@ -849,17 +979,21 @@ def _cmd_setting(state: _ReplState) -> None:
                 console.print("配置操作已中止，回到设置菜单。", markup=False)
                 continue
         elif choice == "3":
-            name = _ask("会话名称（回车取消）：")
-            if name:
+            # M8：回车自动以时间戳命名（_cmd_save 对空名的时间戳缺省）
+            name = _ask("会话名称（回车自动以时间戳命名）：")
+            if name is not None:
                 _cmd_save(state, name)
         elif choice == "4":
-            name = _ask("会话名称（回车取消）：")
-            if name:
+            # M8：回车列出会话数字选择（_cmd_load 对空名的列表分支）
+            name = _ask("会话名称（回车列出可选会话）：")
+            if name is not None:
                 _cmd_load(state, name)
         elif choice == "5":
             value = _ask("on / off（回车显示当前状态）：")
             if value is not None:
                 _cmd_confirm(state, value)
+        elif choice == "6":
+            _cmd_delete(state)
         else:
             console.print("无效选择。", markup=False)
 
@@ -897,6 +1031,8 @@ def _handle_command(user_input: str, state: _ReplState) -> bool:
         _cmd_confirm(state, argument)
     elif command == "/setting":
         _cmd_setting(state)
+    elif command == "/delete":
+        _cmd_delete(state)
     elif command == "/resume":
         _cmd_load(state, _AUTOSAVE_NAME)
     else:
@@ -952,7 +1088,15 @@ def _run_chat(
     if max_rounds < 1:
         console.print("--max-rounds 必须是不小于 1 的整数。", style="red", markup=False)
         sys.exit(2)
-    resolved = _resolve_or_exit(console, model, provider)
+    resolved = _resolve_or_error(console, model, provider)
+    if resolved is None:
+        # M8 首次配置引导：确认则复用配置交互函数建好配置；拒绝/完成后仍无配置
+        # 维持指引 + 退出 2（§5 修订）
+        _offer_first_run_setup(console)
+        resolved = _resolve_or_error(console, model, provider)
+        if resolved is None:
+            _print_config_guide(console)
+            sys.exit(2)
     confirm_flag = {"on": ask_exec}
     try:
         agent = Agent(
@@ -1036,10 +1180,11 @@ class _ConfigSession:
             self._notice_shown = True
 
 
-def _mask_key(api_key: Any) -> str:
-    """key 打码展示：只露前 4 后 4 位，配置界面不整段回显。"""
+def _mask_key(api_key: Any, name: str = "") -> str:
+    """key 打码展示：只露前 4 后 4 位，配置界面不整段回显；缺 key 时提示回退链。"""
     if not isinstance(api_key, str) or not api_key:
-        return "(未设置，回退环境变量 SE_CodeAgent)"
+        chain = f"{config.provider_env_var(name)} → SE_CodeAgent" if name else "SE_CodeAgent"
+        return f"(未设置，回退环境变量 {chain})"
     if len(api_key) <= 8:
         return "****"
     return f"{api_key[:4]}****{api_key[-4:]}"
@@ -1054,30 +1199,165 @@ def _print_providers(console: Console, data: dict[str, Any]) -> None:
     console.print(f"默认模型：{data.get('default') or '（未设置）'}", markup=False)
     for entry in providers:
         console.print(
-            f"  - {entry['name']}　base_url={entry['base_url']}　key={_mask_key(entry.get('api_key'))}"
+            f"  - {entry['name']}　base_url={entry['base_url']}"
+            f"　key={_mask_key(entry.get('api_key'), entry['name'])}"
             f"　模型：{', '.join(entry['models'])}",
             markup=False,
         )
 
 
 def _read_key(prompt: str) -> str:
-    """key 输入不回显（getpass），避免明文残留在终端回滚缓冲。"""
+    """key 输入不回显（getpass），避免明文残留在终端回滚缓冲；中断/输入流不可用视为取消。"""
     try:
         return getpass.getpass(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
+    except (EOFError, KeyboardInterrupt, OSError):
         return ""
 
 
-def _config_add_provider(session: _ConfigSession) -> None:
-    """添加供应商；同名已存在时询问是否更新（§7.4 同名覆盖确认）。"""
+def _choose_provider_type(
+    console: Console,
+) -> tuple[str, config.ProviderPreset | None] | None:
+    """供应商类型选择（M8 预设，D17）：1 自定义 + 8 家预设，编号选择。
+
+    返回 ("custom", None) 或 ("preset", 预设)；取消（回车/EOF/非法序号）返回 None。
+    """
+    console.print("选择供应商类型：", markup=False)
+    console.print("  1. 自定义（手动输入名称/接入点/模型清单）", markup=False)
+    for index, preset in enumerate(config.PROVIDER_PRESETS, start=2):
+        console.print(f"  {index}. {preset.name}", markup=False)
+    index = _parse_index(_ask("选择（回车取消）："), len(config.PROVIDER_PRESETS) + 1)
+    if index is None:
+        return None
+    if index == 0:
+        return ("custom", None)
+    return ("preset", config.PROVIDER_PRESETS[index - 1])
+
+
+def _input_base_url_and_models(
+    console: Console, preset: config.ProviderPreset | None
+) -> tuple[str, list[str]] | None:
+    """接入点与模型清单输入（M8）：预设自动预填、预填项均可修改；自定义手填。
+
+    预设：base_url 回车用官方接入点（可输入自定义）；模型清单回车采用预填，
+    n 则自行输入逗号分隔清单。取消或清单为空返回 None（提示已在函数内给出）。
+    """
+    default_base = preset.base_url if preset is not None else config.DEFAULT_BASE_URL
+    hint = "回车用官方" if preset is not None else "回车默认"
+    base_input = _ask(f"API 接入点（{hint} {default_base}）：")
+    if base_input is None:
+        console.print("已取消。", markup=False)
+        return None
+    base_url = base_input or default_base
+    if preset is not None:
+        models = list(preset.models)
+        console.print(f"预填模型清单：{', '.join(models)}", markup=False)
+        use_prefill = _ask("是否使用预填模型清单？（Y/n）")
+        if use_prefill is None:
+            console.print("已取消。", markup=False)
+            return None
+        if use_prefill.lower() not in ("n", "no"):
+            return base_url, models
+    models_input = _ask("模型清单（逗号分隔，如 deepseek-flash,deepseek-chat）：")
+    if models_input is None:
+        console.print("已取消。", markup=False)
+        return None
+    models = [item.strip() for item in models_input.split(",") if item.strip()]
+    if not models:
+        console.print("至少需要一个模型，已取消。", markup=False)
+        return None
+    return base_url, models
+
+
+def _apply_key_storage(session: _ConfigSession, entry: dict[str, Any], key: str) -> None:
+    """key 存储选择（D17）：1 明文写入 models.json（现状）或 2 用户环境变量。
+
+    选环境变量时 models.json 不落明文、该供应商已有明文一并移除；变量名预设
+    供应商用官方惯用名、自定义按规则生成（config.provider_env_var）。setx 失败
+    回退明文（有明确提示），避免 key 既不在文件也不在环境而丢失。
+    """
     console = session.console
-    name = _ask("供应商名称（不含 '/'，如 deepseek）：")
-    if not name:
+    var = config.provider_env_var(entry["name"])
+    console.print("key 存储方式：", markup=False)
+    console.print("  1. 明文写入 models.json（现状；注意文件权限与备份）", markup=False)
+    console.print(
+        f"  2. 环境变量 {var}（Windows 经 setx 写入并即时生效；macOS/Linux 打印 export 指令）",
+        markup=False,
+    )
+    choice = _ask("选择（回车 = 1）：")
+    if choice is None:
+        # 中断（EOF/Ctrl+C）不是确认：key 不落任何存储（保留现状，与改 key 的
+        # 取消语义一致——update 路径旧 key 不动、add 路径稍后可用 cra config 补）
+        console.print("已取消存储选择，key 未写入（可稍后用 cra config 重新设置）。", markup=False)
+        return
+    if choice == "2":
+        entry.pop("api_key", None)
+        if not _write_env_var_key(console, var, key):
+            entry["api_key"] = key
+    else:
+        entry["api_key"] = key
+
+
+def _write_env_var_key(console: Console, var: str, key: str) -> bool:
+    """把 key 写入用户侧环境变量（D17）；返回是否写入成功。
+
+    变量名先按 shell 标识符校验（非法回退明文——生成规则的未来漂移不应静默
+    产生不可执行的 export）；Windows：setx 写入用户环境（key 经参数传递、不在
+    控制台回显；超长 key 拒绝——setx 对 >1024 字符静默截断），并设置当前进程
+    os.environ 使本会话即时生效；macOS/Linux：打印 export 指令由用户执行（不
+    自动改 shell 配置文件，与卸载侧口径一致），当前进程同样即时设置——本会话
+    内 resolve 无断层，持久化靠用户执行 export。
+    """
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", var):
+        console.print(f"环境变量名 {var!r} 非法，无法写入环境变量。", style="red", markup=False)
+        console.print("key 已改存 models.json（明文）。", style="yellow", markup=False)
+        return False
+    if sys.platform == "win32":
+        if len(key) > 1000:
+            console.print("key 超长，setx 无法可靠写入（超过 1024 字符会静默截断）。", style="yellow", markup=False)
+            console.print("key 已改存 models.json（明文）。", markup=False)
+            return False
+        result = subprocess.run(["setx", var, key], capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            console.print(f"setx 写入失败：{detail}", style="red", markup=False)
+            console.print("key 已改存 models.json（明文）；可稍后用 cra config 重新设置。", style="yellow", markup=False)
+            return False
+        os.environ[var] = key  # setx 不影响已运行进程，当前进程立即生效
+        console.print(f"已写入用户环境变量 {var}（当前进程即时生效，新终端自动可见）。", markup=False)
+        return True
+    console.print("请执行以下命令使 key 生效（写入 ~/.bashrc 或 ~/.zshrc 可持久化）：", markup=False)
+    console.print(f'  export {var}="{key}"', markup=False)
+    os.environ[var] = key  # 当前进程即时生效；新终端须执行上述 export 后才可见
+    console.print(
+        f"注意：指令含 key 明文，勿粘贴到公共场合；当前进程已生效，未执行 export 前新终端暂不可见 {var}。",
+        style="dim",
+        markup=False,
+    )
+    return True
+
+
+def _config_add_provider(session: _ConfigSession) -> None:
+    """添加供应商（§7.4 + M8 预设/存储选择）：编号选择 1 自定义 + 8 家预设。
+
+    选预设自动填官方接入点与模型清单（预填项均可修改）；同名供应商询问是否
+    更新（接入点与模型清单保留，key 更新同样走存储选择）。每步取消都不改盘。
+    """
+    console = session.console
+    chosen = _choose_provider_type(console)
+    if chosen is None:
         console.print("已取消。", markup=False)
         return
-    if "/" in name:
-        console.print("供应商名不得含 '/'（§7.4）。", markup=False)
-        return
+    kind, preset = chosen
+    if kind == "preset":
+        name = preset.name
+    else:
+        name = _ask("供应商名称（不含 '/'，如 deepseek）：")
+        if not name:
+            console.print("已取消。", markup=False)
+            return
+        if "/" in name:
+            console.print("供应商名不得含 '/'（§7.4）。", markup=False)
+            return
     providers = session.providers()
     existing = next((item for item in providers if item.get("name") == name), None)
     if existing is not None:
@@ -1093,25 +1373,21 @@ def _config_add_provider(session: _ConfigSession) -> None:
             existing["base_url"] = new_base
         new_key = _read_key("API key（输入不回显；回车保留现有 key）：")
         if new_key:
-            existing["api_key"] = new_key
+            _apply_key_storage(session, existing, new_key)
         console.print(f"供应商 '{name}' 已更新。", markup=False)
         session.save()
         return
-    base_input = _ask(f"API 接入点（回车默认 {config.DEFAULT_BASE_URL}）：")
-    if base_input is None:
-        console.print("已取消。", markup=False)
-        return
-    base_url = base_input or config.DEFAULT_BASE_URL
-    key = _read_key("API key（输入不回显；回车留空 = 回退环境变量 SE_CodeAgent）：")
-    models_input = _ask("模型清单（逗号分隔，如 deepseek-flash,deepseek-chat）：")
-    if models_input is None:
-        console.print("已取消。", markup=False)
-        return
-    models = [item.strip() for item in models_input.split(",") if item.strip()]
-    if not models:
-        console.print("至少需要一个模型，已取消。", markup=False)
-        return
-    providers.append({"name": name, "base_url": base_url, "api_key": key, "models": models})
+    result = _input_base_url_and_models(console, preset if kind == "preset" else None)
+    if result is None:
+        return  # 取消/无效输入的提示已在输入函数内给出
+    base_url, models = result
+    entry: dict[str, Any] = {"name": name, "base_url": base_url, "models": models}
+    providers.append(entry)
+    key = _read_key("API key（输入不回显；回车留空 = 回退环境变量）：")
+    if key:
+        _apply_key_storage(session, entry, key)
+    else:
+        entry["api_key"] = ""
     console.print(f"供应商 '{name}' 已添加。", markup=False)
     session.save()
 
@@ -1138,14 +1414,15 @@ def _config_remove_provider(session: _ConfigSession) -> None:
 
 
 def _ask(prompt: str) -> str | None:
-    """交互输入统一封装：Ctrl+C/EOF 视为取消（返回 None），不终止会话。
+    """交互输入统一封装：Ctrl+C/EOF/输入流不可用视为取消（返回 None），不终止会话。
 
     REPL 内所有直接 input() 的调用点都必须走本封装——管道输入耗尽或中断时
-    以 traceback 崩掉会话是自审发现的统一缺陷。
+    以 traceback 崩掉会话是自审发现的统一缺陷。OSError 覆盖 stdin 被捕获或
+    关闭的环境（如 pytest、无 stdin 的管道）：与 EOF 同义，按取消处理。
     """
     try:
         return input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
+    except (EOFError, KeyboardInterrupt, OSError):
         return None
 
 
@@ -1254,7 +1531,7 @@ def _config_set_default(session: _ConfigSession) -> None:
 
 
 def _config_update_key(session: _ConfigSession) -> None:
-    """修改供应商 key（getpass 不回显）。"""
+    """修改供应商 key（getpass 不回显；存储选择同添加供应商，M8）。"""
     entry = _choose_entry(session.providers(), session.console, "供应商")
     if entry is None:
         return
@@ -1262,7 +1539,7 @@ def _config_update_key(session: _ConfigSession) -> None:
     if not key:
         session.console.print("已取消。", markup=False)
         return
-    entry["api_key"] = key
+    _apply_key_storage(session, entry, key)
     session.console.print(f"供应商 '{entry['name']}' 的 key 已更新。", markup=False)
     session.save()
 
@@ -1340,9 +1617,15 @@ def _run_config_test() -> None:
     for entry in providers:
         name = entry["name"]
         model_name = entry["models"][0]
-        api_key = entry.get("api_key") or config.get_api_key()
+        # 与 resolve 同一条回退链（D17）：条目 api_key → {PROVIDER}_API_KEY → SE_CodeAgent
+        api_key = config.resolve_provider_api_key(name, entry.get("api_key"))
         if not api_key:
-            console.print(f"✗ {name}（{model_name}）：未配置 key（供应商条目与环境变量均缺）", style="red", markup=False)
+            console.print(
+                f"✗ {name}（{model_name}）：未配置 key（条目与环境变量 "
+                f"{config.provider_env_var(name)} / SE_CodeAgent 均缺）",
+                style="red",
+                markup=False,
+            )
             failures += 1
             continue
         status, detail = llm.probe(base_url=entry["base_url"], api_key=api_key, model_name=model_name)
@@ -1354,6 +1637,218 @@ def _run_config_test() -> None:
                 console.print(f"  {detail}", style="dim", markup=False)
             failures += 1
     sys.exit(1 if failures else 0)
+
+
+# ---- cra uninstall（§7.1/§10 M8）：程序/垫片/PATH/用户数据分级清理 ----
+
+
+def _uv_tool_names() -> list[str]:
+    """uv tool list 的工具名清单；uv 不可用或失败返回空表。
+
+    输出形态：每个工具首行 "名称 vX.Y.Z"，随后若干 "- 别名/可执行文件" 行——
+    非 "-" 开头的非空行首词即工具名。
+    """
+    try:
+        result = subprocess.run(
+            ["uv", "tool", "list"], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return []
+    if result.returncode != 0:
+        return []
+    names: list[str] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("-"):
+            continue
+        names.append(stripped.split()[0])
+    return names
+
+
+def _should_remove_uv_path_entry(other_tool_names: list[str]) -> bool:
+    """PATH 条目移除判定（§10 M8）：卸载后已无其他 uv 工具才移除 ~/.local/bin 条目。
+
+    条目被其他 uv 工具共享时保留（删净自己、不破坏他人）；uv 行为实证：
+    uv tool uninstall 只删工具环境与垫片、不动 PATH，须本命令自理。
+    """
+    return not other_tool_names
+
+
+def _windows_cleanup_script(parent_pid: int, package: str, *, remove_path: bool) -> str:
+    """Windows 后台清理任务脚本（detached PowerShell 执行）。
+
+    先等父进程退出（运行中的 venv 解释器文件被锁，父进程退出后才能删净），
+    再 uv tool uninstall；remove_path 时在卸载后复查 uv tool list——已无其他
+    uv 工具才移除用户 PATH 的 ~/.local/bin 条目（条目共享则保留）。
+    """
+    script = (
+        "$ErrorActionPreference = 'SilentlyContinue'\n"
+        f"while (Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue) "
+        "{ Start-Sleep -Milliseconds 500 }\n"
+        f"uv tool uninstall {package}\n"
+    )
+    if remove_path:
+        script += (
+            "$names = @(uv tool list 2>$null | Where-Object { "
+            "$_ -and -not $_.Trim().StartsWith('-') })\n"
+            "if ($LASTEXITCODE -eq 0 -and $names.Count -eq 0) {\n"
+            "  $bin = Join-Path $env:USERPROFILE '.local\\bin'\n"
+            "  $user = [Environment]::GetEnvironmentVariable('Path', 'User')\n"
+            "  if ($user) {\n"
+            "    $entries = $user -split ';'\n"
+            "    $kept = @($entries | Where-Object { "
+            "$_ -and $_.TrimEnd('\\').ToLowerInvariant() -ne "
+            "$bin.TrimEnd('\\').ToLowerInvariant() })\n"
+            "    if ($kept.Count -lt $entries.Count) {\n"
+            "      [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')\n"
+            "    }\n"
+            "  }\n"
+            "}\n"
+        )
+    return script
+
+
+def _posix_cleanup_script(parent_pid: int, package: str) -> str:
+    """POSIX 后台清理任务脚本（nohup sh -c 执行）：等父进程退出后卸载工具。
+
+    PATH 清理不自动执行：POSIX 的 PATH 条目在 shell 配置文件中，由主流程在
+    确认时打印待删行指令（与 D17"不自动改 rc"口径一致）。
+    """
+    return (
+        f"while kill -0 {parent_pid} 2>/dev/null; do sleep 0.5; done\n"
+        f"uv tool uninstall {package}\n"
+    )
+
+
+def _spawn_cleanup_task(package: str, *, remove_path: bool) -> bool:
+    """生成分离的后台清理任务：等待当前进程退出后执行 uv tool uninstall（§10 M8）。
+
+    返回是否成功启动；uv/powershell/sh 不可用（OSError）时不让卸载流程崩溃，
+    由调用方给出可读提示。
+    """
+    parent_pid = os.getpid()
+    try:
+        if sys.platform == "win32":
+            flags = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+            subprocess.Popen(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    _windows_cleanup_script(parent_pid, package, remove_path=remove_path),
+                ],
+                creationflags=flags,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                ["sh", "-c", _posix_cleanup_script(parent_pid, package)],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except OSError as exc:
+        console_err = Console(file=sys.stderr)
+        console_err.print(f"后台清理任务启动失败：{exc}", style="red", markup=False)
+        console_err.print("请稍后手工执行：uv tool uninstall " + package, markup=False)
+        return False
+    return True
+
+
+def _delete_user_data(console: Console) -> None:
+    """删除用户数据目录 ~/.cra/（models.json 含 API key、sessions/ 会话存档）。
+
+    目录取 config_path().parent，与配置/会话层同一数据源；删除前校验目录名
+    确为 ".cra"（防 config 路径未来演化为可配置时误删他处）；Path.home() 在
+    POSIX 缺 HOME 时抛 RuntimeError，与 OSError 一并兜底为可读提示。
+    """
+    target = config.config_path().parent
+    if target.name != ".cra":
+        console.print(
+            f"数据目录 {target} 异常（预期为 ~/.cra），已取消删除以策安全。",
+            style="red",
+            markup=False,
+        )
+        return
+    if not target.exists():
+        console.print(f"未发现用户数据目录 {target}，跳过数据清理。", markup=False)
+        return
+    try:
+        shutil.rmtree(target)
+    except (OSError, RuntimeError) as exc:
+        console.print(f"用户数据删除失败：{exc}", style="red", markup=False)
+        console.print("请稍后手工删除该目录。", markup=False)
+        return
+    console.print(f"用户数据已删除：{target}", markup=False)
+
+
+def _run_uninstall() -> None:
+    """cra uninstall（§7.1/§10 M8）：两道交互确认后分级清理。
+
+    ① 清单确认默认 N 防误触发；② 用户数据确认默认 Y（诉求即"删干净"，清单
+    明示含 key）；③ 选删则删除 ~/.cra/；④ 生成分离后台任务——等待本进程退出
+    后执行 uv tool uninstall（运行中的 venv 解释器文件被锁），并按"卸载后无
+    其他 uv 工具"决定是否移除用户 PATH 的 ~/.local/bin 条目（Windows 自动、
+    POSIX 打印待删的 shell 配置行指令、不自动改 rc）；⑤ 打印退出提示后正常
+    退出（退出码 0）。uv tool list 无本工具时跳过工具卸载并说明。
+    """
+    console = Console()
+    console.print("cra 卸载程序", markup=False)
+    console.print("将删除以下内容：", markup=False)
+    console.print(f"  - uv 工具 {_UNINSTALL_PACKAGE}（程序本体与 cra 垫片）", markup=False)
+    console.print(
+        f"  - 若无其他 uv 工具：用户 PATH 中的 ~/{_UV_BIN_DIRNAME} 条目"
+        "（Windows 自动移除；macOS/Linux 打印待删指令）",
+        markup=False,
+    )
+    answer = _ask("确认卸载？（y/N）")
+    if answer is None or answer.lower() not in ("y", "yes"):
+        console.print("已取消，未删除任何内容。", markup=False)
+        return
+    data_answer = _ask(
+        "同时删除用户数据 ~/.cra/（models.json 含 API key、sessions/ 会话存档）？（Y/n）"
+    )
+    if data_answer is None:
+        # 中断（EOF/Ctrl+C）不是确认：数据含 key 与会话存档，宁可保留（cra 自审复核）
+        console.print("输入已中断，用户数据 ~/.cra/ 已保留。", markup=False)
+    elif data_answer.lower() in ("n", "no"):
+        console.print("用户数据 ~/.cra/ 已保留。", markup=False)
+    else:
+        _delete_user_data(console)  # 回车（默认 Y）或显式 y
+    tools = _uv_tool_names()
+    others = [name for name in tools if name != _UNINSTALL_PACKAGE]
+    if _UNINSTALL_PACKAGE not in tools:
+        console.print(
+            f"未在 uv tool list 中找到 {_UNINSTALL_PACKAGE}（如以 uv run 方式使用），"
+            "跳过工具卸载与 PATH 清理。",
+            markup=False,
+        )
+        return
+    remove_path = _should_remove_uv_path_entry(others)
+    spawned = _spawn_cleanup_task(_UNINSTALL_PACKAGE, remove_path=remove_path)
+    if spawned and remove_path and sys.platform != "win32":
+        console.print(
+            "卸载完成后，请从 shell 配置文件（~/.bashrc / ~/.zshrc 等）删除如下 PATH 行（如有）：",
+            markup=False,
+        )
+        console.print(f'  export PATH="$HOME/{_UV_BIN_DIRNAME}:$PATH"', markup=False)
+    if spawned:
+        console.print("程序将在退出后完成卸载。", markup=False)
+    else:
+        console.print(
+            f"后台任务未启动：请稍后手工执行 uv tool uninstall {_UNINSTALL_PACKAGE}。",
+            style="yellow",
+            markup=False,
+        )
 
 
 # ---- cra review（§7.5）：非交互一次性审查 ----
@@ -1721,6 +2216,15 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["test"],
         help="test：连通性自检（对每个供应商发一次 max_tokens=1 请求）；省略进入交互式配置",
     )
+
+    subparsers.add_parser(
+        "uninstall",
+        help="卸载本工具（程序/垫片/PATH/用户数据分级清理，两道交互确认）",
+        description=(
+            "卸载 code-review-agent：确认后删除 uv 工具与 cra 垫片（退出后由后台任务"
+            "执行），可选删除用户数据 ~/.cra/；确认前不删除任何内容。"
+        ),
+    )
     return parser
 
 
@@ -1734,6 +2238,8 @@ def main() -> None:
             _run_config_test()
         else:
             _run_config_interactive()
+    elif args.command == "uninstall":
+        _run_uninstall()
     elif args.command in (None, "chat"):
         # 裸入口与 chat 共用参数面：getattr 缺省值须与 _add_shared_options 的
         # default 完全一致（MAX_TOOL_ROUNDS / None / store_true 的 False），

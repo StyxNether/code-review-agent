@@ -362,14 +362,17 @@ class Agent:
         if model is not None:
             self._chat_model = model
             self.model = getattr(model, "model_name", "") or config.get_model()
+            self.provider: str | None = None  # 注入路径无供应商语义（测试用）
         elif resolved is not None:
             self._chat_model = llm.create_model(
                 resolved.model, api_key=resolved.api_key, base_url=resolved.base_url
             )
             self.model = resolved.model
+            self.provider = resolved.provider
         else:
             self._chat_model = llm.create_model()
             self.model = getattr(self._chat_model, "model_name", "") or config.get_model()
+            self.provider = None
         self.registry = registry if registry is not None else get_default_registry()
         self.max_context_tokens = (
             max_context_tokens
@@ -413,6 +416,7 @@ class Agent:
         new_graph = self._build_graph(model=new_model)
         self._chat_model = new_model
         self.model = resolved.model
+        self.provider = resolved.provider
         self._graph = new_graph
 
     def reset(self) -> None:
