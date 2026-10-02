@@ -1,7 +1,7 @@
 """cra 命令行入口：argparse（chat/review/config）+ REPL + rich 流式彩色渲染。
 
-cli 只管交互与渲染（§3.4）：LLM 循环与工具执行一律经 Agent；从 llm 导入的只有
-LLMError 类型与 config test 专用的 probe 探测（§7.4，无 Agent 循环的最小通路）、
+cli 只管交互与渲染：LLM 循环与工具执行一律经 Agent；从 llm 导入的只有
+LLMError 类型与 config test 专用的 probe 探测（无 Agent 循环的最小通路）、
 从 tools 导入的只有 ERROR_PREFIX 常量，不直接执行工具。
 """
 
@@ -31,7 +31,7 @@ from cra.llm import LLMError
 from cra.tools import ERROR_PREFIX
 
 _TOOL_ARGS_PREVIEW_LIMIT = 80
-# 分级标记的着色（M2 验收反馈：严重红 / 一般黄 / 建议绿）
+# 分级标记的着色：严重红 / 一般黄 / 建议绿
 _SEVERITY_STYLES = {"严重": "bold red", "一般": "bold yellow", "建议": "bold green"}
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 # 标记识别（行内任意位置）：兼容模型自行输出的 ** 包裹，星号只被消耗不参与渲染
@@ -39,14 +39,14 @@ _MARKER_RE = re.compile(r"\*{0,2}(【(?:严重|一般|建议)】|修改建议[�
 _VALID_SEVERITIES = ("严重", "一般", "建议")
 _MAX_REVIEW_LINES = 2000  # 单文件嵌入 prompt 的行数上限：防超大文件 token 爆炸（超出截断并明示）
 _DEFAULT_EXPORT_NAME = "cra-export.md"
-_AUTOSAVE_NAME = "_last"  # 会话自动保留的固定存档名（§7.3 M7；/resume 的数据来源）
-# 卸载程序（§7.1/§10 M8）：uv 工具名与垫片所在目录
+_AUTOSAVE_NAME = "_last"  # 会话自动保留的固定存档名（/resume 的数据来源）
+# 卸载程序：uv 工具名与垫片所在目录
 _UNINSTALL_PACKAGE = "code-review-agent"
 _UV_BIN_DIRNAME = ".local/bin"  # uv 垫片目录（用户目录下），显示与 PATH 清理共用
 
-# ---- M6 渲染管线（D15）：行级单元流式的结构识别与阈值 ----
+# ---- 流式渲染管线：行级单元流式的结构识别与阈值 ----
 _SENTENCE_FLUSH_CHARS = 60  # 句级早发阈值：无结构长行的待发字符数
-_HOLDBACK_UNITS = 2  # 分类窗口：工具结果后暂扣的单元数，第 2 个到达即解除（D15）
+_HOLDBACK_UNITS = 2  # 分类窗口：工具结果后暂扣的单元数，第 2 个到达即解除
 _CJK_SENTENCE_CHARS = "。！？；"
 _ASCII_SENTENCE_CHARS = ".!?;"
 _LIST_RE = re.compile(r"^\s*([-*+]|\d{1,9}[.)])\s")
@@ -225,7 +225,7 @@ def _short(text: str, limit: int = _TOOL_ARGS_PREVIEW_LIMIT) -> str:
 
 
 def _setup_hint() -> str:
-    """key 设置命令按当前平台给出（M3 挂账：指引跨平台化）。"""
+    """key 设置命令按当前平台给出。"""
     if sys.platform == "win32":
         return '设置方法（Windows）：setx SE_CodeAgent "sk-你的key"，然后新开终端重试。'
     return (
@@ -235,12 +235,12 @@ def _setup_hint() -> str:
 
 
 def _local_now() -> datetime:
-    """本地时区当前时间（报告/导出的时间戳；DTZ 规则要求显式 tz 语义）。"""
+    """本地时区当前时间（报告/导出的时间戳，显式本地时区语义）。"""
     return datetime.now().astimezone()
 
 
 def _print_config_guide(console: Console) -> None:
-    """无任何可用配置时的引导（§5/§7.4；退出码 2 由调用方执行）。"""
+    """无任何可用配置时的引导（退出码 2 由调用方执行）。"""
     try:
         providers = config.load_raw().get("providers") or []
     except config.ConfigError:
@@ -261,7 +261,7 @@ def _print_config_guide(console: Console) -> None:
 
 
 class _StreamingMarkdown:
-    """§3.1 流式渲染（M6，D15）：行级单元流式 + 句级早发 + 过程/正文暂扣分类。
+    """流式渲染：行级单元流式 + 句级早发 + 过程/正文暂扣分类。
 
     渲染粒度从段落批渲染细化为"可安全落盘的单元"即时渲染：
     - 单元 = 单行正文（Markdown 渲染、标记着色）或完整性组（围栏/列表/表格/
@@ -269,13 +269,12 @@ class _StreamingMarkdown:
       围栏行——到达才落盘，rich 逐条打印列表项会因块边距插入空行，实证）；
     - 句级早发：无结构长行（≥ _SENTENCE_FLUSH_CHARS）在句界提前落盘，不等
       换行（守卫见 _sentence_cut）；
-    - 过程/正文分类沿用 flush 机制（M4）：工具打点前的缓冲文本按暗色平文
+    - 过程/正文分类沿用 flush 机制：工具打点前的缓冲文本按暗色平文
       落盘为过程叙述。分类窗口 = 工具结果后的首个单元——此刻无法预知该消息
-      是下一轮叙述还是最终回答，暂扣至第二个单元到达再落盘（过程叙述实测
-      通常单行，M4 验收记录），避免单行叙述以正文样式抢先显示。
+      是下一轮叙述还是最终回答，暂扣至第二个单元到达再落盘（过程叙述
+      实测通常单行），避免单行叙述以正文样式抢先显示。
 
-    追加式打印，不使用 rich.Live（D5 边界复核结论见 D15：Live 仅在需要重绘
-    已打印内容时才有必要）。
+    追加式打印，不使用 rich.Live（Live 仅在需要重绘已打印内容时才有必要）。
     """
 
     def __init__(self, console: Console) -> None:
@@ -292,8 +291,8 @@ class _StreamingMarkdown:
         """最近一次工具边界（打点/结果/叙述冲洗）之后是否收到过文本增量。
 
         _run_turn 的兜底判据：收到过就不再 feed 返回值——否则短回答（不构成
-        单元的增量已在缓冲）会被返回值重复渲染。旧判据 has_output 覆盖不了
-        "增量已到但未落盘"的窗口（M6 现场修复的重复渲染缺陷）。
+        单元的增量已在缓冲）会被返回值重复渲染。判据用"边界后是否收到过增量"
+        而非"是否有可见输出"：后者覆盖不了增量已到但尚未落盘（未成单元）的窗口。
         """
         return self._delta_since_boundary
 
@@ -321,7 +320,7 @@ class _StreamingMarkdown:
             self._print_unit(rest)
 
     def flush_pending(self) -> str | None:
-        """工具打点前把缓冲中的过程叙述按暗色平文落盘（M4 分流机制的延续）。
+        """工具打点前把缓冲中的过程叙述按暗色平文落盘。
 
         返回冲洗的文本（供 /process 过程记录）；无内容返回 None。暂扣单元与
         缓冲一并冲洗：叙述不完整成段也要实时跟随其工具轮显示，不得与最终
@@ -371,7 +370,7 @@ class _StreamingMarkdown:
         if not text.strip():
             return
         if self._pending_break:
-            self._console.print()  # 段落/工具边界后留空行（M1 验收反馈：避免文字堆叠）
+            self._console.print()  # 段落/工具边界后留空行，避免文字堆叠
             self._pending_break = False
         self._render_lines(text)
         self._has_output = True
@@ -489,12 +488,12 @@ class _StreamingMarkdown:
         return tail[:cut]
 
     def _render_lines(self, text: str) -> None:
-        """逐行分级渲染（M2 验收反馈：分级标记着色、修改建议加粗）。
+        """逐行分级渲染：分级标记着色、修改建议加粗。
 
         含标记的行按标记切片：标记本体着色/加粗、文本片走单行 Markdown
         （保留行内代码渲染），同行拼接；不含标记的行（含围栏内部）聚合为
         Markdown 块，保持既有渲染不变。不往 Markdown 里插 **——CommonMark
-        的 flanking 规则下"中文**【标记】**中文"不会解析为加粗（修复轮实测）。
+        的 flanking 规则下"中文**【标记】**中文"不会解析为加粗。
         """
         state: tuple[str, int] | None = None
         chunk: list[str] = []
@@ -514,7 +513,7 @@ class _StreamingMarkdown:
 
     def _render_marked_line(self, line: str) -> None:
         """单行按标记切片渲染：文本片经 Markdown 渲染为 Text 片段、标记片着色，
-        拼为单行 Text 一次打印（验收走查修复：Markdown 片段自带换行与全宽填充，
+        拼为单行 Text 一次打印（Markdown 片段自带换行与全宽填充，
         逐片 print 会把行内标记拆成多行）。"""
         line_text = Text()
         position = 0
@@ -563,7 +562,7 @@ def _run_turn(
 
     返回本轮最终文本（供 /export 记录最近一轮结论）；中断或失败返回 None。
     process_events 就地追加本轮过程事件（叙述/工具/结果），供 /process 重放。
-    no_stream 时不接收增量，待 run 返回后整体渲染（§7.2 --no-stream）。
+    no_stream 时不接收增量，待 run 返回后整体渲染（--no-stream）。
     """
     streamer = _StreamingMarkdown(console)
 
@@ -601,7 +600,7 @@ def _run_turn(
             # --no-stream：整体渲染；工具边界后无任何增量（兼容端点不产生文本
             # 增量，或最终消息未流出增量）时用返回值兜底，界面不能空白——
             # 判据是"边界后是否收到过增量"而非"是否有可见输出"：后者在增量
-            # 已到但尚未落盘（未成单元）时会误判，把返回值重复渲染（M6 修复）
+            # 已到但尚未落盘（未成单元）时会误判，把返回值重复渲染
             streamer.feed(result)
         return result
     except KeyboardInterrupt:
@@ -609,7 +608,7 @@ def _run_turn(
     except LLMError as exc:
         console.print("[请求失败] " + str(exc), style="red", markup=False)
         console.print("请检查网络与 API key。", style="dim", markup=False)
-    except Exception as exc:  # noqa: BLE001 — REPL 边界兜底：意外异常也不终止会话（§3.4）
+    except Exception as exc:  # noqa: BLE001 — REPL 边界兜底：意外异常也不终止会话
         console.print(f"[意外错误] {type(exc).__name__}: {exc}", style="red", markup=False)
         console.print("本轮已终止，上下文保留；可重试或输入 exit 退出。", style="dim", markup=False)
     finally:
@@ -631,7 +630,7 @@ class _ReplState:
 
 
 def _exec_confirm_callback(console: Console, flag: dict[str, bool]) -> ExecConfirmCallback:
-    """run_python 执行确认回调（§7.2）：开关关闭时自动放行，开启时逐次询问。"""
+    """run_python 执行确认回调：开关关闭时自动放行，开启时逐次询问。"""
 
     def confirm(args: dict[str, Any]) -> bool:
         if not flag.get("on"):
@@ -663,7 +662,7 @@ def _resolve_or_error(
     """解析本次使用的模型连接；配置损坏打印可读错误后退出 2，无配置返回 None。
 
     调用方仅 _run_chat（review 有自己的非交互路径，不走本函数）：返回 None 时
-    先走首次配置引导（M8），完成后仍无配置才指引退出 2（§5 修订）。
+    先走首次配置引导，完成后仍无配置才指引退出 2。
     """
     try:
         return config.resolve(model=model, provider=provider)
@@ -673,7 +672,7 @@ def _resolve_or_error(
 
 
 def _offer_first_run_setup(console: Console) -> None:
-    """首次配置引导（§5 M8）：chat 无任何可用配置时询问"是否现在配置"。
+    """首次配置引导：chat 无任何可用配置时询问"是否现在配置"。
 
     确认后按 添加供应商 → 设置默认模型 顺序复用 cra config 交互函数与
     _ConfigSession（不重写逻辑）；任何一步取消都不阻断——完成后仍无配置由
@@ -705,10 +704,10 @@ def _offer_first_run_setup(console: Console) -> None:
 
 
 def _cmd_change_model(state: _ReplState) -> None:
-    """/change model（§7.3）：列出供应商与模型清单、序号选择；切换后上下文保留。
+    """/change model：列出供应商与模型清单、序号选择；切换后上下文保留。
 
-    清单标注"当前使用中"（M8）：当前供应商与当前模型分别打标，流程本身不变
-    （先选供应商再选模型）。
+    清单标注"当前使用中"：当前供应商与当前模型分别打标，流程是先选供应商
+    再选模型。
     """
     console = state.console
     try:
@@ -755,7 +754,7 @@ def _cmd_change_model(state: _ReplState) -> None:
 
 
 def _cmd_save(state: _ReplState, name: str) -> None:
-    """/save（§7.3）：会话消息数组写入 ~/.cra/sessions/<名称>.json；缺省名用时间戳。"""
+    """/save：会话消息数组写入 ~/.cra/sessions/<名称>.json；缺省名用时间戳。"""
     if not name:
         name = _local_now().strftime("%Y%m%d-%H%M%S")
     try:
@@ -791,7 +790,7 @@ def _choose_session(console: Console, names: list[str], label: str) -> str | Non
 
 
 def _print_session_history(console: Console, data: list[dict[str, Any]]) -> None:
-    """加载成功后打印全部会话历史（你>/cra> 前缀逐条，§7.3 M8）。
+    """加载成功后打印全部会话历史（你>/cra> 前缀逐条）。
 
     序列化形态为 agent 层 messages_to_dict（{"type","data":{"content"}}）；
     工具结果随 cra> 前缀一并显示，保持"全部历史"语义。取值对非预期结构
@@ -808,9 +807,9 @@ def _print_session_history(console: Console, data: list[dict[str, Any]]) -> None
 
 
 def _cmd_load(state: _ReplState, name: str) -> None:
-    """/load（§7.3）：从会话文件整体替换当前会话；系统提示词保持当前版本。
+    """/load：从会话文件整体替换当前会话；系统提示词保持当前版本。
 
-    M8：省略名称时列出会话数字选择（回车取消）；加载成功自动打印全部会话历史。
+    省略名称时列出会话数字选择（回车取消）；加载成功自动打印全部会话历史。
     """
     console = state.console
     if not name:
@@ -842,7 +841,7 @@ def _cmd_load(state: _ReplState, name: str) -> None:
 
 
 def _cmd_delete(state: _ReplState) -> None:
-    """/delete（§7.3 M8）：删除已有会话——列表数字选择 + y/N 确认后删除文件。
+    """/delete：删除已有会话——列表数字选择 + y/N 确认后删除文件。
 
     `_last` 同样可删（删即清除自动保留存档）；确认默认 N 防误触发。
     """
@@ -873,7 +872,7 @@ def _cmd_delete(state: _ReplState) -> None:
 
 
 def _cmd_undo(state: _ReplState) -> None:
-    """/undo（§7.3）：作废上一轮对话，上下文回滚到该轮开始前。"""
+    """/undo：作废上一轮对话，上下文回滚到该轮开始前。"""
     if state.agent.undo_turn():
         state.console.print("[dim]已作废上一轮对话（上下文回滚）。[/]")
     else:
@@ -881,7 +880,7 @@ def _cmd_undo(state: _ReplState) -> None:
 
 
 def _cmd_context(state: _ReplState) -> None:
-    """/context（§7.3）：token 用量与距截断阈值的余量。"""
+    """/context：token 用量与距截断阈值的余量。"""
     status = state.agent.context_status()
     used, limit = int(status["used"]), int(status["limit"])
     source = "字符估算" if status["estimated"] else "真实 usage"
@@ -892,7 +891,7 @@ def _cmd_context(state: _ReplState) -> None:
 
 
 def _cmd_export(state: _ReplState, filename: str) -> None:
-    """/export（§7.3）：最近一轮结论导出 Markdown；缺省 cra-export.md。"""
+    """/export：最近一轮结论导出 Markdown；缺省 cra-export.md。"""
     if state.last_answer is None:
         state.console.print("尚无可导出的结论：先完成一轮对话再 /export。", markup=False)
         return
@@ -910,8 +909,8 @@ def _cmd_export(state: _ReplState, filename: str) -> None:
 
 
 def _cmd_process(state: _ReplState) -> None:
-    """/process（§7.3）：重放最近一轮的过程明细——真折叠不可行（D5 同因）下
-    的"紧凑摘要行 + 可选重放"方案（§10 M6）：打点保持紧凑，细节按需展开。"""
+    """/process：重放最近一轮的过程明细——流式界面不做真折叠（需重绘已打印
+    内容，Windows 传统控制台不可靠），以紧凑打点 + 按需重放替代。"""
     console = state.console
     if not state.last_process:
         console.print("最近一轮没有过程记录（该轮没有调用工具，或尚未开始对话）。", markup=False)
@@ -927,7 +926,7 @@ def _cmd_process(state: _ReplState) -> None:
 
 
 def _cmd_confirm(state: _ReplState, argument: str) -> None:
-    """/confirm（§7.3）：run_python 执行确认开关；省略参数显示当前状态。"""
+    """/confirm：run_python 执行确认开关；省略参数显示当前状态。"""
     arg = argument.lower()
     if arg == "on":
         state.confirm_flag["on"] = True
@@ -952,7 +951,7 @@ _SETTING_MENU = """\
 
 
 def _cmd_setting(state: _ReplState) -> None:
-    """/setting（§7.3 M7）：数字选择菜单，全部复用既有命令实现（纯接线）。
+    """/setting：数字选择菜单，全部复用既有命令实现（纯接线）。
 
     嵌套循环：单项操作失败或取消后回到菜单，0/回车退出菜单回到 REPL 主循环；
     菜单全程不触碰会话消息，上下文不丢。EOF/Ctrl+C 经 _ask 归一为取消。
@@ -979,12 +978,12 @@ def _cmd_setting(state: _ReplState) -> None:
                 console.print("配置操作已中止，回到设置菜单。", markup=False)
                 continue
         elif choice == "3":
-            # M8：回车自动以时间戳命名（_cmd_save 对空名的时间戳缺省）
+            # 回车自动以时间戳命名（_cmd_save 对空名的时间戳缺省）
             name = _ask("会话名称（回车自动以时间戳命名）：")
             if name is not None:
                 _cmd_save(state, name)
         elif choice == "4":
-            # M8：回车列出会话数字选择（_cmd_load 对空名的列表分支）
+            # 回车列出会话数字选择（_cmd_load 对空名的列表分支）
             name = _ask("会话名称（回车列出可选会话）：")
             if name is not None:
                 _cmd_load(state, name)
@@ -999,7 +998,7 @@ def _cmd_setting(state: _ReplState) -> None:
 
 
 def _handle_command(user_input: str, state: _ReplState) -> bool:
-    """内置 REPL 命令分发（§7.3）；返回 False 表示按普通文本交给模型。"""
+    """内置 REPL 命令分发；返回 False 表示按普通文本交给模型。"""
     if not user_input.startswith("/"):
         return False
     parts = user_input.split(maxsplit=1)
@@ -1041,7 +1040,7 @@ def _handle_command(user_input: str, state: _ReplState) -> bool:
 
 
 def _hint_last_session(console: Console) -> None:
-    """启动时检测到非空自动保留存档则提示一行（§7.3 M7；不自动加载，避免上下文静默混入）。"""
+    """启动时检测到非空自动保留存档则提示一行（不自动加载，避免上下文静默混入）。"""
     path = sessions.session_path(_AUTOSAVE_NAME)  # "_last" 恒为合法名（sessions 层校验通过）
     if not path.exists():
         return
@@ -1054,7 +1053,7 @@ def _hint_last_session(console: Console) -> None:
 
 
 def _autosave_session(state: _ReplState) -> None:
-    """REPL 以任何方式退出时把当前会话覆盖写入 _last.json（§7.3 M7 会话自动保留）。
+    """REPL 以任何方式退出时把当前会话覆盖写入 _last.json（会话自动保留）。
 
     空会话跳过：新开即退的空会话不该覆盖上一次的有效存档。失败仅提示不阻断
     退出——自动保留是尽力而为的便利功能，不能把"退出"变成故障路径（在 finally
@@ -1083,15 +1082,15 @@ def _run_chat(
     ask_exec: bool = False,
 ) -> None:
     """REPL 启动与收尾：解析模型配置、构建 Agent 与会话状态后进入主循环，
-    以任何方式退出时自动保留会话（§7.3 M7）；命令分发与对话轮次见 _repl_loop。"""
+    以任何方式退出时自动保留会话；命令分发与对话轮次见 _repl_loop。"""
     console = Console()
     if max_rounds < 1:
         console.print("--max-rounds 必须是不小于 1 的整数。", style="red", markup=False)
         sys.exit(2)
     resolved = _resolve_or_error(console, model, provider)
     if resolved is None:
-        # M8 首次配置引导：确认则复用配置交互函数建好配置；拒绝/完成后仍无配置
-        # 维持指引 + 退出 2（§5 修订）
+        # 首次配置引导：确认则复用配置交互函数建好配置；拒绝/完成后仍无配置
+        # 维持指引 + 退出 2
         _offer_first_run_setup(console)
         resolved = _resolve_or_error(console, model, provider)
         if resolved is None:
@@ -1104,7 +1103,7 @@ def _run_chat(
             max_tool_rounds=max_rounds,
             confirm_exec=_exec_confirm_callback(console, confirm_flag),
         )
-    except Exception as exc:  # noqa: BLE001 — 启动失败按运行错误退出，不裸抛堆栈（§7.5）
+    except Exception as exc:  # noqa: BLE001 — 启动失败按运行错误退出，不裸抛堆栈
         console.print(f"[意外错误] {type(exc).__name__}: {exc}", style="red", markup=False)
         sys.exit(2)
     state = _ReplState(
@@ -1118,7 +1117,7 @@ def _run_chat(
     try:
         _repl_loop(state)
     finally:
-        # 覆盖 exit / /exit / EOF / Ctrl+C 全部退出路径（§7.3 M7 会话自动保留）
+        # 覆盖 exit / /exit / EOF / Ctrl+C 全部退出路径（会话自动保留）
         _autosave_session(state)
 
 
@@ -1127,14 +1126,14 @@ def _repl_loop(state: _ReplState) -> None:
     console = state.console
     while True:
         try:
-            # 提示符着色便于在流式输出中定位输入位置（M2 验收反馈）
+            # 提示符着色便于在流式输出中定位输入位置
             console.print("你> ", style="bold cyan", end="")
             user_input = input().strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n再见。", markup=False, highlight=False)
             return
         if not user_input:
-            continue  # 空输入/纯空白直接进入下一轮提示，不调 API（§6）
+            continue  # 空输入/纯空白直接进入下一轮提示，不调 API
         if user_input in ("exit", "/exit"):
             console.print("再见。")
             return
@@ -1149,13 +1148,13 @@ def _repl_loop(state: _ReplState) -> None:
             state.last_answer = result
 
 
-# ---- cra config（§7.4）：交互式配置与连通性自检 ----
+# ---- cra config：交互式配置与连通性自检 ----
 
 
 class _ConfigSession:
     """cra config 交互会话：内存中修改、每个完整操作即写盘（任何时刻退出都一致）。
 
-    首次成功写盘后打印文件权限与备份注意事项（§7.4：key 为明文属已知取舍 D9）。
+    首次成功写盘后打印文件权限与备份注意事项（配置文件含明文 key）。
     """
 
     def __init__(self, console: Console, data: dict[str, Any]) -> None:
@@ -1170,7 +1169,7 @@ class _ConfigSession:
         try:
             config.save_raw(self.data)
         except (config.ConfigError, OSError) as exc:
-            # OSError(磁盘满/目录不可写)不以 traceback 终止交互会话(cra 自审)
+            # OSError(磁盘满/目录不可写)不以 traceback 终止交互会话
             self.console.print(f"写入失败：{exc}", style="red", markup=False)
             return
         if not self._notice_shown:
@@ -1217,7 +1216,7 @@ def _read_key(prompt: str) -> str:
 def _choose_provider_type(
     console: Console,
 ) -> tuple[str, config.ProviderPreset | None] | None:
-    """供应商类型选择（M8 预设，D17）：1 自定义 + 8 家预设，编号选择。
+    """供应商类型选择（预设）：1 自定义 + 8 家预设，编号选择。
 
     返回 ("custom", None) 或 ("preset", 预设)；取消（回车/EOF/非法序号）返回 None。
     """
@@ -1236,7 +1235,7 @@ def _choose_provider_type(
 def _input_base_url_and_models(
     console: Console, preset: config.ProviderPreset | None
 ) -> tuple[str, list[str]] | None:
-    """接入点与模型清单输入（M8）：预设自动预填、预填项均可修改；自定义手填。
+    """接入点与模型清单输入：预设自动预填、预填项均可修改；自定义手填。
 
     预设：base_url 回车用官方接入点（可输入自定义）；模型清单回车采用预填，
     n 则自行输入逗号分隔清单。取消或清单为空返回 None（提示已在函数内给出）。
@@ -1269,7 +1268,7 @@ def _input_base_url_and_models(
 
 
 def _apply_key_storage(session: _ConfigSession, entry: dict[str, Any], key: str) -> None:
-    """key 存储选择（D17）：1 明文写入 models.json（现状）或 2 用户环境变量。
+    """key 存储选择：1 明文写入 models.json 或 2 用户环境变量。
 
     选环境变量时 models.json 不落明文、该供应商已有明文一并移除；变量名预设
     供应商用官方惯用名、自定义按规则生成（config.provider_env_var）。setx 失败
@@ -1298,19 +1297,30 @@ def _apply_key_storage(session: _ConfigSession, entry: dict[str, Any], key: str)
 
 
 def _write_env_var_key(console: Console, var: str, key: str) -> bool:
-    """把 key 写入用户侧环境变量（D17）；返回是否写入成功。
+    """把 key 写入用户侧环境变量；返回是否写入成功。
 
     变量名先按 shell 标识符校验（非法回退明文——生成规则的未来漂移不应静默
-    产生不可执行的 export）；Windows：setx 写入用户环境（key 经参数传递、不在
-    控制台回显；超长 key 拒绝——setx 对 >1024 字符静默截断），并设置当前进程
-    os.environ 使本会话即时生效；macOS/Linux：打印 export 指令由用户执行（不
-    自动改 shell 配置文件，与卸载侧口径一致），当前进程同样即时设置——本会话
-    内 resolve 无断层，持久化靠用户执行 export。
+    产生不可执行的 export）。覆盖保护：变量已由本程序设置（登记在案）时直接
+    更新；否则若当前环境已有同名变量（可能属用户或其它程序），询问确认后才
+    覆盖，拒绝则回退明文——卸载时只清理登记在案的变量，绝不触碰他人变量。
+    Windows：setx 写入用户环境（key 经参数传递、不在控制台回显；超长 key 拒绝
+    ——setx 对 >1024 字符静默截断），并设置当前进程 os.environ 使本会话即时
+    生效；macOS/Linux：打印 export 指令由用户执行（不自动改 shell 配置文件，
+    与卸载侧口径一致），当前进程同样即时设置——本会话内 resolve 无断层，
+    持久化靠用户执行 export。写入成功后登记变量名（卸载清理的依据）。
     """
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", var):
         console.print(f"环境变量名 {var!r} 非法，无法写入环境变量。", style="red", markup=False)
         console.print("key 已改存 models.json（明文）。", style="yellow", markup=False)
         return False
+    if var not in config.registered_env_vars() and var in os.environ:
+        # 用成员判断而非 get() 真值：已存在但值为空串的用户变量同样受保护。
+        # 已知边界：另一终端 setx 过而本会话未继承时检测不到（POSIX 无持久化
+        # 查询手段），登记清单覆盖了本程序自己设置的变量、他人变量以询问兜底
+        answer = _ask(f"环境变量 {var} 已存在（可能由您或其它程序设置）。是否覆盖其值？（y/N）")
+        if answer is None or answer.lower() not in ("y", "yes"):
+            console.print("已保留原值；key 将改存 models.json（明文）。", style="yellow", markup=False)
+            return False
     if sys.platform == "win32":
         if len(key) > 1000:
             console.print("key 超长，setx 无法可靠写入（超过 1024 字符会静默截断）。", style="yellow", markup=False)
@@ -1323,11 +1333,13 @@ def _write_env_var_key(console: Console, var: str, key: str) -> bool:
             console.print("key 已改存 models.json（明文）；可稍后用 cra config 重新设置。", style="yellow", markup=False)
             return False
         os.environ[var] = key  # setx 不影响已运行进程，当前进程立即生效
+        _register_env_var(console, var)
         console.print(f"已写入用户环境变量 {var}（当前进程即时生效，新终端自动可见）。", markup=False)
         return True
     console.print("请执行以下命令使 key 生效（写入 ~/.bashrc 或 ~/.zshrc 可持久化）：", markup=False)
     console.print(f'  export {var}="{key}"', markup=False)
     os.environ[var] = key  # 当前进程即时生效；新终端须执行上述 export 后才可见
+    _register_env_var(console, var)
     console.print(
         f"注意：指令含 key 明文，勿粘贴到公共场合；当前进程已生效，未执行 export 前新终端暂不可见 {var}。",
         style="dim",
@@ -1336,8 +1348,20 @@ def _write_env_var_key(console: Console, var: str, key: str) -> bool:
     return True
 
 
+def _register_env_var(console: Console, var: str) -> None:
+    """登记本程序写入的环境变量名；失败不阻塞 key 设置，但须明示后果（卸载清单缺项）。"""
+    try:
+        config.register_env_var(var)
+    except OSError as exc:
+        console.print(
+            f"环境变量登记失败：{exc}——卸载时将无法自动清理 {var}，请记于手工清理。",
+            style="yellow",
+            markup=False,
+        )
+
+
 def _config_add_provider(session: _ConfigSession) -> None:
-    """添加供应商（§7.4 + M8 预设/存储选择）：编号选择 1 自定义 + 8 家预设。
+    """添加供应商（预设/key 存储选择）：编号选择 1 自定义 + 8 家预设。
 
     选预设自动填官方接入点与模型清单（预填项均可修改）；同名供应商询问是否
     更新（接入点与模型清单保留，key 更新同样走存储选择）。每步取消都不改盘。
@@ -1356,7 +1380,7 @@ def _config_add_provider(session: _ConfigSession) -> None:
             console.print("已取消。", markup=False)
             return
         if "/" in name:
-            console.print("供应商名不得含 '/'（§7.4）。", markup=False)
+            console.print("供应商名不得含 '/'。", markup=False)
             return
     providers = session.providers()
     existing = next((item for item in providers if item.get("name") == name), None)
@@ -1393,7 +1417,7 @@ def _config_add_provider(session: _ConfigSession) -> None:
 
 
 def _config_remove_provider(session: _ConfigSession) -> None:
-    """删除供应商；default 引用被删供应商时警告并清除默认（§7.4 边界规则）。"""
+    """删除供应商；default 引用被删供应商时警告并清除默认。"""
     console = session.console
     providers = session.providers()
     entry = _choose_entry(providers, console, "要删除的供应商")
@@ -1417,7 +1441,7 @@ def _ask(prompt: str) -> str | None:
     """交互输入统一封装：Ctrl+C/EOF/输入流不可用视为取消（返回 None），不终止会话。
 
     REPL 内所有直接 input() 的调用点都必须走本封装——管道输入耗尽或中断时
-    以 traceback 崩掉会话是自审发现的统一缺陷。OSError 覆盖 stdin 被捕获或
+    以 traceback 崩掉会话。OSError 覆盖 stdin 被捕获或
     关闭的环境（如 pytest、无 stdin 的管道）：与 EOF 同义，按取消处理。
     """
     try:
@@ -1430,9 +1454,9 @@ def _parse_index(raw: str | None, count: int) -> int | None:
     """序号输入 → 0-based 下标；空/取消/越界（含 0 与负数）返回 None。
 
     必须显式拒绝 0 与负数："0" 经 int(raw)-1 会命中 Python 负索引静默取到
-    最后一项，配合删除操作构成不可逆误删（cra 自审发现的严重项）。匹配用
+    最后一项，配合删除操作构成不可逆误删。匹配用
     ASCII 白名单正则：isdigit() 对上标数字等返回 True 而 int() 抛错，两者
-    接受集不一致（cra 复审发现）。
+    接受集不一致。
     """
     if raw is None or not re.fullmatch(r"[1-9][0-9]*", raw) or not 1 <= int(raw) <= count:
         return None
@@ -1477,7 +1501,7 @@ def _config_manage_models(session: _ConfigSession) -> None:
 
 
 def _config_add_model(session: _ConfigSession, entry: dict[str, Any]) -> None:
-    """添加模型；同名模型已存在时询问是否覆盖（§7.4）。
+    """添加模型；同名模型已存在时询问是否覆盖。
 
     模型清单是纯名称数组，"覆盖"即确认保留该名称（幂等），用于防误操作。
     """
@@ -1498,7 +1522,7 @@ def _config_add_model(session: _ConfigSession, entry: dict[str, Any]) -> None:
 
 
 def _config_remove_model(session: _ConfigSession, entry: dict[str, Any]) -> None:
-    """删除模型；default 引用被删组合时警告并清除默认（§7.4 边界规则）。"""
+    """删除模型；default 引用被删组合时警告并清除默认。"""
     if len(entry["models"]) <= 1:
         session.console.print("供应商至少保留一个模型，无法删除。", markup=False)
         return
@@ -1531,7 +1555,7 @@ def _config_set_default(session: _ConfigSession) -> None:
 
 
 def _config_update_key(session: _ConfigSession) -> None:
-    """修改供应商 key（getpass 不回显；存储选择同添加供应商，M8）。"""
+    """修改供应商 key（getpass 不回显；存储选择同添加供应商）。"""
     entry = _choose_entry(session.providers(), session.console, "供应商")
     if entry is None:
         return
@@ -1551,10 +1575,10 @@ def _print_broken_config(console: Console, exc: config.ConfigError) -> None:
 
 
 def _run_config_interactive(console: Console | None = None) -> None:
-    """cra config 交互式配置模式（§7.4）：增删供应商/模型、设默认、改 key。
+    """cra config 交互式配置模式：增删供应商/模型、设默认、改 key。
 
-    独立运行（cra config）时损坏配置按运行错误退出 2（§7.5）；/setting 菜单
-    复用 _config_interactive_session 并自行处理 ConfigError（M7），不依赖
+    独立运行（cra config）时损坏配置按运行错误退出 2；/setting 菜单
+    复用 _config_interactive_session 并自行处理 ConfigError，不依赖
     退出码数值做降级契约。
     """
     console = console or Console()
@@ -1599,7 +1623,7 @@ def _config_interactive_session(console: Console, data: dict[str, Any]) -> None:
 
 
 def _run_config_test() -> None:
-    """cra config test（§7.4）：对每个供应商发一次 max_tokens=1 请求报告连通性。
+    """cra config test：对每个供应商发一次 max_tokens=1 请求报告连通性。
 
     退出码：全部 OK 为 0，存在失败为 1（检查结论），配置损坏为 2（运行错误）。
     """
@@ -1617,7 +1641,7 @@ def _run_config_test() -> None:
     for entry in providers:
         name = entry["name"]
         model_name = entry["models"][0]
-        # 与 resolve 同一条回退链（D17）：条目 api_key → {PROVIDER}_API_KEY → SE_CodeAgent
+        # 与 resolve 同一条回退链：条目 api_key → {PROVIDER}_API_KEY → SE_CodeAgent
         api_key = config.resolve_provider_api_key(name, entry.get("api_key"))
         if not api_key:
             console.print(
@@ -1639,7 +1663,7 @@ def _run_config_test() -> None:
     sys.exit(1 if failures else 0)
 
 
-# ---- cra uninstall（§7.1/§10 M8）：程序/垫片/PATH/用户数据分级清理 ----
+# ---- cra uninstall：程序/垫片/PATH/用户数据分级清理 ----
 
 
 def _uv_tool_names() -> list[str]:
@@ -1666,10 +1690,10 @@ def _uv_tool_names() -> list[str]:
 
 
 def _should_remove_uv_path_entry(other_tool_names: list[str]) -> bool:
-    """PATH 条目移除判定（§10 M8）：卸载后已无其他 uv 工具才移除 ~/.local/bin 条目。
+    """PATH 条目移除判定：卸载后已无其他 uv 工具才移除 ~/.local/bin 条目。
 
-    条目被其他 uv 工具共享时保留（删净自己、不破坏他人）；uv 行为实证：
-    uv tool uninstall 只删工具环境与垫片、不动 PATH，须本命令自理。
+    条目被其他 uv 工具共享时保留（删净自己、不破坏他人）；uv tool uninstall
+    只删工具环境与垫片、不动 PATH，PATH 清理须本命令自理。
     """
     return not other_tool_names
 
@@ -1712,7 +1736,7 @@ def _posix_cleanup_script(parent_pid: int, package: str) -> str:
     """POSIX 后台清理任务脚本（nohup sh -c 执行）：等父进程退出后卸载工具。
 
     PATH 清理不自动执行：POSIX 的 PATH 条目在 shell 配置文件中，由主流程在
-    确认时打印待删行指令（与 D17"不自动改 rc"口径一致）。
+    确认时打印待删行指令（不自动改写 rc）。
     """
     return (
         f"while kill -0 {parent_pid} 2>/dev/null; do sleep 0.5; done\n"
@@ -1721,7 +1745,7 @@ def _posix_cleanup_script(parent_pid: int, package: str) -> str:
 
 
 def _spawn_cleanup_task(package: str, *, remove_path: bool) -> bool:
-    """生成分离的后台清理任务：等待当前进程退出后执行 uv tool uninstall（§10 M8）。
+    """生成分离的后台清理任务：等待当前进程退出后执行 uv tool uninstall。
 
     返回是否成功启动；uv/powershell/sh 不可用（OSError）时不让卸载流程崩溃，
     由调用方给出可读提示。
@@ -1791,25 +1815,111 @@ def _delete_user_data(console: Console) -> None:
     console.print(f"用户数据已删除：{target}", markup=False)
 
 
+def _windows_env_cleanup_script(names: list[str]) -> str:
+    """生成环境变量清理脚本：对用户环境逐个删除登记在案的变量。
+
+    .NET 的 SetEnvironmentVariable 写回注册表时会广播 WM_SETTINGCHANGE，
+    新开终端立即可见（reg delete 无此效果）。名单在调用侧已过滤为合法
+    标识符（登记文件可被手改，不得把任意内容拼进脚本）。
+    """
+    quoted = ", ".join(f"'{name}'" for name in names)
+    return (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"foreach ($name in @({quoted})) {{\n"
+        "  [Environment]::SetEnvironmentVariable($name, $null, 'User')\n"
+        "}\n"
+    )
+
+
+def _cleanup_env_vars(console: Console, names: list[str]) -> bool:
+    """删除本程序设置的环境变量（仅限登记清单，勿动用户已有变量）；返回是否全部成功。
+
+    Windows：前台 PowerShell 清用户环境（同步执行、会广播变更，卸载完成即生效）
+    并清当前进程环境；POSIX：本程序从不自动写 shell 配置文件，持久化的 export
+    行只能由用户删除（打印待删行指引），当前进程环境此处清掉。非法标识符
+    （登记文件被手改）不进脚本、提示手工处理。
+    """
+    safe = [name for name in names if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)]
+    skipped = [name for name in names if name not in safe]
+    if skipped:
+        console.print(
+            f"以下登记项不是合法变量名（登记文件可能被手改），请手工检查：{', '.join(skipped)}",
+            style="yellow",
+            markup=False,
+        )
+    if not safe:
+        return not skipped
+    if sys.platform == "win32":
+        script = _windows_env_cleanup_script(safe)
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            console.print(f"环境变量清理失败：{exc}", style="red", markup=False)
+            console.print("请手工删除上述变量（系统设置 → 环境变量，或 PowerShell）。", markup=False)
+            return False
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            console.print(f"环境变量清理失败：{detail}", style="red", markup=False)
+            console.print("请手工删除上述变量（系统设置 → 环境变量，或 PowerShell）。", markup=False)
+            return False
+    else:
+        console.print(
+            "若已将下列变量的 export 写入 shell 配置文件，请手工删除对应行（本程序不自动改 rc）：",
+            markup=False,
+        )
+        for name in safe:
+            console.print(f"  - 含 {name} 的 export 行", markup=False)
+    for name in safe:
+        os.environ.pop(name, None)  # 当前进程立即生效（与设置侧对称）
+    if sys.platform == "win32":
+        console.print(f"已删除 {len(safe)} 个本程序设置的环境变量。", markup=False)
+    else:
+        console.print(
+            f"已从当前进程清除 {len(safe)} 个变量；持久化的 export 行请按上方指引手工删除。",
+            markup=False,
+        )
+    return True
+
+
 def _run_uninstall() -> None:
-    """cra uninstall（§7.1/§10 M8）：两道交互确认后分级清理。
+    """cra uninstall：三道交互确认后分级清理（只清项目文件夹之外、且属本程序的东西）。
 
     ① 清单确认默认 N 防误触发；② 用户数据确认默认 Y（诉求即"删干净"，清单
-    明示含 key）；③ 选删则删除 ~/.cra/；④ 生成分离后台任务——等待本进程退出
-    后执行 uv tool uninstall（运行中的 venv 解释器文件被锁），并按"卸载后无
-    其他 uv 工具"决定是否移除用户 PATH 的 ~/.local/bin 条目（Windows 自动、
-    POSIX 打印待删的 shell 配置行指令、不自动改 rc）；⑤ 打印退出提示后正常
-    退出（退出码 0）。uv tool list 无本工具时跳过工具卸载并说明。
+    明示含 key），选删则删除 ~/.cra/；③ 环境变量清理确认默认 Y——**只清理
+    本程序登记在案的变量**（设置时写入 ~/.cra/env-vars.json），用户已有的
+    同名变量绝不触碰；④ 生成分离后台任务——等待本进程退出后执行 uv tool
+    uninstall（运行中的 venv 解释器文件被锁），并按"卸载后无其他 uv 工具"
+    决定是否移除用户 PATH 的 ~/.local/bin 条目（Windows 自动、POSIX 打印
+    待删的 shell 配置行指令、不自动改 rc）；⑤ 打印退出提示后正常退出（退出
+    码 0）。项目文件夹（仓库克隆本身）不由本程序删除——老师删除克隆目录
+    即可；uv tool list 无本工具时跳过工具卸载并说明。
     """
     console = Console()
+    # 登记清单必须在删除 ~/.cra/ 之前读出（它就在 ~/.cra/ 里），否则无从区分
+    # "本程序设置的变量"与"用户已有的变量"
+    registered = config.registered_env_vars()
     console.print("cra 卸载程序", markup=False)
-    console.print("将删除以下内容：", markup=False)
+    console.print(
+        "将删除以下内容（其中用户数据与环境变量可在后续确认中保留；"
+        "项目文件夹本身请自行删除，本程序不触碰）：",
+        markup=False,
+    )
     console.print(f"  - uv 工具 {_UNINSTALL_PACKAGE}（程序本体与 cra 垫片）", markup=False)
     console.print(
         f"  - 若无其他 uv 工具：用户 PATH 中的 ~/{_UV_BIN_DIRNAME} 条目"
         "（Windows 自动移除；macOS/Linux 打印待删指令）",
         markup=False,
     )
+    console.print("  - 用户数据 ~/.cra/（models.json 含 API key、sessions/ 会话存档）", markup=False)
+    if registered:
+        console.print("  - 本程序设置的环境变量：" + ", ".join(registered), markup=False)
+    else:
+        console.print("  - 本程序设置的环境变量：（无登记）", markup=False)
     answer = _ask("确认卸载？（y/N）")
     if answer is None or answer.lower() not in ("y", "yes"):
         console.print("已取消，未删除任何内容。", markup=False)
@@ -1818,12 +1928,29 @@ def _run_uninstall() -> None:
         "同时删除用户数据 ~/.cra/（models.json 含 API key、sessions/ 会话存档）？（Y/n）"
     )
     if data_answer is None:
-        # 中断（EOF/Ctrl+C）不是确认：数据含 key 与会话存档，宁可保留（cra 自审复核）
+        # 中断（EOF/Ctrl+C）不是确认：数据含 key 与会话存档，宁可保留
         console.print("输入已中断，用户数据 ~/.cra/ 已保留。", markup=False)
     elif data_answer.lower() in ("n", "no"):
         console.print("用户数据 ~/.cra/ 已保留。", markup=False)
     else:
         _delete_user_data(console)  # 回车（默认 Y）或显式 y
+    if registered:
+        env_answer = _ask(
+            "同时删除上述本程序设置的环境变量（不触碰您已有的其它变量）？（Y/n）"
+        )
+        if env_answer is None:
+            console.print("输入已中断，环境变量已保留。", markup=False)
+            env_cleaned = True  # 未执行清理，不构成失败
+        elif env_answer.lower() in ("n", "no"):
+            console.print("环境变量已保留。", markup=False)
+            env_cleaned = True
+        else:
+            env_cleaned = _cleanup_env_vars(console, registered)  # 回车（默认 Y）或显式 y
+    else:
+        console.print(
+            "未发现本程序登记的环境变量；SE_CodeAgent 等您自行设置的变量不会被动。", markup=False
+        )
+        env_cleaned = True
     tools = _uv_tool_names()
     others = [name for name in tools if name != _UNINSTALL_PACKAGE]
     if _UNINSTALL_PACKAGE not in tools:
@@ -1841,7 +1968,13 @@ def _run_uninstall() -> None:
             markup=False,
         )
         console.print(f'  export PATH="$HOME/{_UV_BIN_DIRNAME}:$PATH"', markup=False)
-    if spawned:
+    if spawned and not env_cleaned:
+        console.print(
+            "注意：环境变量未能全部自动清理，请按上方提示手工处理后，程序再退出完成卸载。",
+            style="yellow",
+            markup=False,
+        )
+    elif spawned:
         console.print("程序将在退出后完成卸载。", markup=False)
     else:
         console.print(
@@ -1851,18 +1984,32 @@ def _run_uninstall() -> None:
         )
 
 
-# ---- cra review（§7.5）：非交互一次性审查 ----
+# ---- cra review：非交互一次性审查 ----
 
 
 class _ReviewFileError(Exception):
     """审查入参的文件级错误（路径不存在/目录无 .py/不可读），退出码 2。"""
 
 
-def _collect_review_files(paths: list[str]) -> list[tuple[str, str]]:
-    """展开审查入参（§7.1/§7.5）：多路径=批量、目录展开第一层 .py、'-' 读 stdin。
+_TEXT_SNIFF_BYTES = 8192  # 二进制嗅探采样窗口：文件头部含 null 字节即判为二进制
 
-    返回 (显示名, 内容)：显示名保留用户输入形态（location 引用与报告标题用它），
-    stdin 固定 "<stdin>"。内容显式 utf-8 + errors='replace'（§3.2 通用规则）。
+
+def _looks_textual(path: Path) -> bool:
+    """采样文件头部判断是否为文本文件（null 字节嗅探，与 read_file 同判据）。"""
+    try:
+        with path.open("rb") as handle:
+            return b"\x00" not in handle.read(_TEXT_SNIFF_BYTES)
+    except OSError:
+        return False
+
+
+def _collect_review_files(paths: list[str]) -> list[tuple[str, str]]:
+    """展开审查入参：多路径=批量、目录展开第一层文本文件、'-' 读 stdin。
+
+    目录展开取第一层的普通文件，跳过点开头的隐藏文件（含 .env 等敏感文件，
+    其内容不应进入审查）与二进制文件，跳过清单打印到 stderr 提示。返回
+    (显示名, 内容)：显示名保留用户输入形态（location 引用与报告标题用它），
+    stdin 固定 "<stdin>"。内容显式 utf-8 + errors='replace'。
     """
     collected: list[tuple[str, str]] = []
     for raw in paths:
@@ -1873,10 +2020,21 @@ def _collect_review_files(paths: list[str]) -> list[tuple[str, str]]:
         if not path.exists():
             raise _ReviewFileError(f"路径不存在：{path}")
         if path.is_dir():
-            py_files = sorted(path.glob("*.py"))
-            if not py_files:
-                raise _ReviewFileError(f"目录 {path} 第一层没有 .py 文件。")
-            collected.extend((str(item), _read_review_text(item)) for item in py_files)
+            selected: list[Path] = []
+            skipped: list[str] = []
+            for item in sorted(path.iterdir()):
+                if not item.is_file() or item.name.startswith("."):
+                    continue
+                if not _looks_textual(item):
+                    skipped.append(item.name)
+                    continue
+                selected.append(item)
+            if not selected:
+                detail = f"（已跳过：{', '.join(skipped)}）" if skipped else ""
+                raise _ReviewFileError(f"目录 {path} 第一层没有可审查的文本文件{detail}。")
+            if skipped:
+                print(f"已跳过二进制或隐藏文件：{', '.join(skipped)}", file=sys.stderr)
+            collected.extend((str(item), _read_review_text(item)) for item in selected)
         else:
             collected.append((str(path), _read_review_text(path)))
     return collected
@@ -1892,12 +2050,12 @@ def _read_review_text(path: Path) -> str:
 
 def _review_prompt(display_name: str, content: str, *, json_mode: bool) -> str:
     """构造单文件审查 prompt：文件内容直接附上（带行号），避免工具轮的不确定性，
-    并覆盖系统提示词"引导用户保存为文件"的对话分支（§3.3）。
+    并与系统提示词的对话式粘贴代码分支保持一致的"直接审查、不要求另存"语义。
 
     行号格式与 read_file 一致（1-based、右对齐竖线分隔），保证 location 行号可靠；
     超过 _MAX_REVIEW_LINES 的文件截断并在 prompt 中明示。围栏长度按内容中最长
     连续反引号动态加大（内容本身含四反引号时不会提前闭合）；并明示围栏内是
-    待审查数据而非指令，收敛提示注入面（cra 自审建议）。
+    待审查数据而非指令，收敛提示注入面。
     """
     lines = content.splitlines()[:_MAX_REVIEW_LINES]
     numbered = "\n".join(f"{i:>4} | {line}" for i, line in enumerate(lines, start=1))
@@ -1925,7 +2083,7 @@ def _review_prompt(display_name: str, content: str, *, json_mode: bool) -> str:
 
 
 def _report_schema_errors(data: Any) -> list[str]:
-    """§7.5 schema 校验；返回错误列表（空=通过）。uncertain 缺省按 False 补全。"""
+    """报告 schema 校验；返回错误列表（空=通过）。uncertain 缺省按 False 补全。"""
     if not isinstance(data, dict):
         return ["顶层必须是 JSON 对象"]
     files = data.get("files")
@@ -1967,7 +2125,7 @@ def _report_schema_errors(data: Any) -> list[str]:
 
 
 def _parse_json_report(answer: str) -> dict[str, Any]:
-    """从模型回答提取并校验 §7.5 schema 的 JSON；失败抛 ValueError。"""
+    """从模型回答提取并校验报告 schema 的 JSON；失败抛 ValueError。"""
     text = answer.strip()
     if text.startswith("```"):
         newline = text.find("\n")
@@ -1991,7 +2149,7 @@ def _parse_json_report(answer: str) -> dict[str, Any]:
 
 
 def _merge_json_reports(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """多文件的 schema 片段合并为 §7.5 统一形态；单文件直接透传其 summary。"""
+    """多文件的 schema 片段合并为统一形态；单文件直接透传其 summary。"""
     if not entries:
         return {"files": [], "summary": "没有可用的审查结果。"}
     if len(entries) == 1:
@@ -2001,7 +2159,7 @@ def _merge_json_reports(entries: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _json_report_markdown(merged: dict[str, Any]) -> str:
-    """--json 模式的 Markdown 报告（-o 与 --json 可同时使用，§7.5）。"""
+    """--json 模式的 Markdown 报告（-o 与 --json 可同时使用）。"""
     lines = ["# cra 审查报告", "", f"> 生成时间：{_local_now():%Y-%m-%d %H:%M:%S}（--json 模式）", ""]
     for entry in merged["files"]:
         lines += [f"## {entry['file']}", "", f"**整体评价**：{entry['summary']}", ""]
@@ -2021,7 +2179,7 @@ def _json_report_markdown(merged: dict[str, Any]) -> str:
 def _text_report_markdown(files: list[tuple[str, str]], reports: list[tuple[str, str]]) -> str:
     """非 --json 模式的 Markdown 报告：结论原文嵌入（本身即 Markdown）。
 
-    审查失败的文件保留标题并标注缺章，标题清单与正文一致（cra 复审建议）。
+    审查失败的文件保留标题并标注缺章，标题清单与正文一致。
     """
     lines = [
         "# cra 审查报告",
@@ -2040,7 +2198,7 @@ def _text_report_markdown(files: list[tuple[str, str]], reports: list[tuple[str,
 
 
 def _run_review(args: argparse.Namespace) -> None:
-    """cra review 主流程（§7.5）：批量审查、-o 报告、--json 结构化输出与退出码。
+    """cra review 主流程：批量审查、-o 报告、--json 结构化输出与退出码。
 
     stdout 只承载结论/--json（过程与错误走 stderr）；退出码 0 完成、1 为 --json
     模式下存在【严重】问题、2 为运行错误（含单文件失败与顶层兜底）。
@@ -2054,8 +2212,8 @@ def _run_review(args: argparse.Namespace) -> None:
         sys.exit(2)
     try:
         _run_review_main(args, console)
-    except Exception as exc:  # noqa: BLE001 — §7.5 顶层兜底：未预期异常按运行错误退出 2；
-        # 禁止裸逃逸（Python 默认退出码 1 会伪装成"发现严重问题"）（cra 复查补齐）
+    except Exception as exc:  # noqa: BLE001 — 顶层兜底：未预期异常按运行错误退出 2；
+        # 禁止裸逃逸（Python 默认退出码 1 会伪装成"发现严重问题"）
         console.print(f"[意外错误] {type(exc).__name__}: {exc}", style="red", markup=False)
         sys.exit(2)
 
@@ -2077,7 +2235,7 @@ def _run_review_main(args: argparse.Namespace, console: Console) -> None:
         sys.exit(2)
     try:
         agent = Agent(resolved=resolved, max_tool_rounds=args.max_rounds)
-    except Exception as exc:  # noqa: BLE001 — 启动失败按运行错误退出，不裸抛堆栈（§7.5）
+    except Exception as exc:  # noqa: BLE001 — 启动失败按运行错误退出，不裸抛堆栈
         console.print(f"[意外错误] {type(exc).__name__}: {exc}", style="red", markup=False)
         sys.exit(2)
 
@@ -2090,7 +2248,7 @@ def _run_review_main(args: argparse.Namespace, console: Console) -> None:
         prompt = _review_prompt(display_name, content, json_mode=args.json)
         try:
             answer = agent.run(prompt)
-        except Exception as exc:  # noqa: BLE001 — 单文件失败继续批量；最终退出码 2（§7.5）
+        except Exception as exc:  # noqa: BLE001 — 单文件失败继续批量；最终退出码 2
             console.print(
                 f"[审查失败] {display_name}:{type(exc).__name__}: {exc}", style="red", markup=False
             )
@@ -2105,7 +2263,7 @@ def _run_review_main(args: argparse.Namespace, console: Console) -> None:
                 continue
             entries = report["files"]
             # 模型可能违反 prompt 约定返回多条 files 条目:全部采纳并全量判定
-            # 严重性,静默丢弃会造成退出码误判(cra 自审)
+            # 严重性,静默丢弃会造成退出码误判
             if any(finding.get("severity") == "严重" for entry in entries for finding in entry["findings"]):
                 severe = True
             json_entries.extend(entries)
@@ -2148,7 +2306,7 @@ def _version_text() -> str:
 
 
 def _add_shared_options(parser: argparse.ArgumentParser, *, no_stream_help: str = "关闭流式渲染，整体输出") -> None:
-    """chat / review 通用参数（§7.2）。"""
+    """chat / review 通用参数。"""
     parser.add_argument("--model", metavar="NAME", help="临时覆盖模型名（须在已解析供应商的清单内）")
     parser.add_argument("--provider", metavar="NAME", help="临时覆盖供应商（单独使用时取其第一个模型）")
     parser.add_argument("--no-stream", action="store_true", help=no_stream_help)
@@ -2156,7 +2314,7 @@ def _add_shared_options(parser: argparse.ArgumentParser, *, no_stream_help: str 
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """构建 CLI 参数解析器（§7.1/§7.2）。"""
+    """构建 CLI 参数解析器。"""
     parser = argparse.ArgumentParser(
         prog="cra",
         description=(
@@ -2165,11 +2323,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--version", action="version", version=_version_text())
-    # M7 裸入口：子命令可选，缺省由 main 进入 chat REPL（§7.1）。
+    # 裸入口：子命令可选，缺省由 main 进入 chat REPL。
     # 共享参数不加在顶层——argparse 子解析器默认值会覆盖顶层同名值，
-    # 选项面保持在子命令之后（cra chat --no-stream），行为与 M5 起一致
+    # 选项面保持在子命令之后（cra chat --no-stream）
     subparsers = parser.add_subparsers(dest="command", required=False)
-    # §8.2 核对项：限制声明在 CLI 层面可见（工具 description 之外的第二道明示）
+    # 限制声明在 CLI 层面可见（工具 description 之外的第二道明示）
     chat = subparsers.add_parser(
         "chat",
         help="进入对话式代码审查 REPL（run_python 非沙箱、限时执行）",
@@ -2187,7 +2345,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     review = subparsers.add_parser(
         "review",
-        help="非交互一次性审查（多路径=批量；'-' 读 stdin；目录展开第一层 .py）",
+        help="非交互一次性审查（多路径=批量；'-' 读 stdin；目录展开第一层文本文件）",
         description=(
             "非交互一次性审查并输出结论。注意：Agent 的 run_python 工具在本机直接"
             "执行代码，非沙箱、限时执行（默认 10 秒，超时强杀进程树），详见 README「限制」。"
@@ -2229,7 +2387,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """cra 入口（§7.1）：省略子命令默认进入 chat REPL（M7 裸入口）。"""
+    """cra 入口：省略子命令默认进入 chat REPL。"""
     args = _build_parser().parse_args()
     if args.command == "review":
         _run_review(args)
@@ -2243,7 +2401,7 @@ def main() -> None:
     elif args.command in (None, "chat"):
         # 裸入口与 chat 共用参数面：getattr 缺省值须与 _add_shared_options 的
         # default 完全一致（MAX_TOOL_ROUNDS / None / store_true 的 False），
-        # 否则裸 cra 与 cra chat 行为会静默分叉（有测试锁定）
+        # 否则裸 cra 与 cra chat 行为会静默分叉
         _run_chat(
             model=getattr(args, "model", None),
             provider=getattr(args, "provider", None),
