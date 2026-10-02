@@ -6,12 +6,14 @@
 
 ## 功能
 
-- 多轮对话式代码审查，具备上下文记忆（`/clear` 清空、`/undo` 作废上一轮、`/save` `/load` 会话持久化、退出自动保留会话 + `/resume` 恢复）
+- 多轮对话式代码审查，具备上下文记忆（`/clear` 清空、`/undo` 作废上一轮、`/save` `/load` `/delete` 会话管理、退出自动保留会话 + `/resume` 恢复）
 - Agent 自主调用工具：列目录 / 读文件 / 运行 Python 代码核实问题（基于 LangGraph 的 Agent 循环 + function calling）
 - 结构化审查结论：【严重/一般/建议】+ `文件:行号` + 修改建议
-- 多供应商模型配置：`cra config` 交互式管理 `~/.cra/models.json`，连通性自检（`cra config test`），REPL 内 `/change model` 热切换（上下文保留）与 `/setting` 设置菜单
+- 多供应商模型配置：`cra config` 交互式管理 `~/.cra/models.json`（内置 DeepSeek/Kimi/OpenAI/百炼/Z.ai/BigModel 等 8 家预设，选编号即自动填官方接入点与模型清单），key 可选明文或环境变量存储，连通性自检（`cra config test`），REPL 内 `/change model` 热切换（上下文保留）与 `/setting` 设置菜单
+- 首次使用引导：新机器无任何配置时 `cra` 会询问"是否现在配置"，确认后按 添加供应商 → key → 设默认模型 引导完成并直接进入对话
 - 非交互审查：`cra review` 多路径批量、读 stdin、`-o` Markdown 报告、`--json` 结构化输出与分级退出码
 - 流式彩色输出（行级粒度：完整行即时渲染，围栏/列表整组不切段；`--no-stream` 可关）；LLM 瞬时失败自动重试（SDK 内建，认证错误快速失败）
+- 一键卸载：`cra uninstall` 两道确认后分级清理程序、垫片、PATH 条目与用户数据
 
 ## 架构
 
@@ -50,7 +52,7 @@ uv run cra
 
 裸 `cra` 命令安装（可选）：`uv tool install -e .` 之后可直接运行 `cra`（无需 `uv run` 前缀）；省略子命令时默认进入对话式审查（裸形式不带参数，需传选项时写作 `cra chat --no-stream` 等）。
 
-首次运行时若无任何配置，会打印 `cra config` 引导并以退出码 2 结束。
+首次运行（新机器）：若无任何配置，`cra` 会询问"是否现在配置"——回车确认后按 **添加供应商（可选预设）→ 填 API key → 设默认模型** 引导完成，随即进入对话；拒绝则打印 `cra config` 指引并以退出码 2 结束。`cra review` 为非交互模式，无配置时直接打印指引退出 2。
 
 ## cra config：模型配置
 
@@ -61,25 +63,28 @@ uv run cra config        # 交互式配置
 uv run cra config test   # 连通性自检：对每个供应商发一次 max_tokens=1 请求，报告 OK / 401 / 超时
 ```
 
+**供应商预设**：添加供应商时提供编号选择——1 自定义 + 8 家预设（DeepSeek、Kimi (Moonshot)、OpenAI、阿里云百炼、Z.ai Coding Plan / Z.ai API、BigModel Coding Plan / BigModel API）。选预设自动填入官方 base_url 与模型清单，**预填项均可修改**（base_url 回车用官方接入点或输入自定义；模型清单可答 n 自行输入）。
+
+**key 存储选择**：填入 key 后可选——1) 明文写入 models.json（注意文件权限与备份）；2) 环境变量（预设供应商用官方惯用名如 `DEEPSEEK_API_KEY`，自定义按"供应商名大写、空格与非字母数字转 `_`、`_API_KEY` 后缀"生成）。Windows 经 `setx` 自动写入并即时生效（key 不回显）；macOS/Linux 打印 `export` 指令由用户执行。选环境变量时 models.json 不落明文，已有明文一并移除。
+
 配置文件格式（`default` 以第一个 `/` 分隔"供应商/模型"）：
 
 ```json
 {
-  "default": "deepseek/deepseek-flash",
+  "default": "DeepSeek/deepseek-flash",
   "providers": [
     {
-      "name": "deepseek",
+      "name": "DeepSeek",
       "base_url": "https://api.deepseek.com",
-      "api_key": "sk-...",
       "models": ["deepseek-flash", "deepseek-v4-pro"]
     }
   ]
 }
 ```
 
-**⚠ 文件权限与备份注意事项**：该文件以**明文**保存 API key，属本机敏感数据。请保持仅本人可读（POSIX 下写入时自动收紧为 0600；Windows 下请勿放在共享目录），备份时同样注意保密——勿上传到仓库、网盘或聊天工具。
+**⚠ 文件权限与备份注意事项**：选择明文存储时该文件以**明文**保存 API key，属本机敏感数据。请保持仅本人可读（POSIX 下写入时自动收紧为 0600；Windows 下请勿放在共享目录），备份时同样注意保密——勿上传到仓库、网盘或聊天工具。
 
-解析优先级：`--model/--provider` 参数 > 配置文件 `default` > 环境变量。供应商条目缺 `api_key` 时回退环境变量 `SE_CodeAgent`（是否有效由认证环节暴露）。
+解析优先级：`--model/--provider` 参数 > 配置文件 `default` > 环境变量。供应商条目缺 `api_key` 时按序回退环境变量：`{供应商}_API_KEY`（预设供应商用官方惯用名）→ `SE_CodeAgent`（key 是否有效由认证环节暴露）。
 
 ### 环境变量（models.json 缺省时的回退）
 
@@ -90,6 +95,8 @@ uv run cra config test   # 连通性自检：对每个供应商发一次 max_tok
 | `CRA_BASE_URL` | 否 | `https://api.deepseek.com` | OpenAI 兼容接入点 |
 | `CRA_EXEC_TIMEOUT` | 否 | `10` | 代码执行超时（秒，1~60） |
 | `CRA_MAX_CONTEXT_TOKENS` | 否 | `100000` | 上下文截断阈值（tokens） |
+
+供应商 key 亦可存入各自的官方惯用变量（如 `DEEPSEEK_API_KEY`、`MOONSHOT_API_KEY`、`OPENAI_API_KEY`、`DASHSCOPE_API_KEY`、`ZAI_API_KEY`、`ZHIPUAI_API_KEY`）——`cra config` 选环境变量存储时自动生成；回退顺序见上文"解析优先级"。
 
 ## 使用示例
 
@@ -119,9 +126,11 @@ code-review-agent 已就绪（模型：deepseek/deepseek-flash）。提出审查
 |------|------|
 | `/help` | 命令列表 |
 | `/clear` | 清空上下文（系统提示词保留） |
-| `/change model`（别名 `/model`） | 列出供应商与模型清单、序号切换；上下文保留 |
-| `/setting` | 设置菜单（数字选择）：切模型 / 配置模型列表 / 保存 / 加载会话 / 执行确认开关；0 或回车返回对话 |
-| `/save [名称]` / `/load <名称>` | 会话持久化到 `~/.cra/sessions/<名称>.json` / 恢复（整体替换） |
+| `/change model`（别名 `/model`） | 列出供应商与模型清单（标注"当前使用中"）、序号切换；上下文保留 |
+| `/setting` | 设置菜单（数字选择）：切模型 / 配置模型列表 / 保存 / 加载 / 删除会话 / 执行确认开关；0 或回车返回对话 |
+| `/save [名称]` | 会话持久化到 `~/.cra/sessions/<名称>.json`（省略名称自动以时间戳命名） |
+| `/load [名称]` | 恢复会话（整体替换当前会话）；省略名称时列出会话数字选择（回车取消）；加载成功后自动打印全部会话历史 |
+| `/delete` | 删除会话：列表数字选择 + y/N 确认（`_last` 同样可删） |
 | `/resume` | 恢复最近一次自动保留的会话（`_last`） |
 | `/undo` | 作废上一轮对话 |
 | `/context` | 显示 token 用量与距截断阈值的余量 |
@@ -159,6 +168,21 @@ uv run cra review a.py --json                   # 结构化 JSON 输出（stdout
 }
 ```
 
+### cra uninstall：一键卸载
+
+```bash
+cra uninstall
+```
+
+两道交互确认（第一道默认 **N** 防误触发）后分级清理：
+
+1. **清单确认**：列出将删除内容（uv 工具 `code-review-agent` 与 cra 垫片、PATH 条目），回车或 `n` 取消、不删除任何内容；
+2. **用户数据**：询问是否同时删除 `~/.cra/`（models.json 含 API key、sessions/ 会话存档），默认 **Y**（诉求即"删干净"），答 `n` 保留；
+3. **后台清理**：生成等待本进程退出后执行 `uv tool uninstall` 的分离后台任务（运行中的解释器文件被锁，须父进程退出后才能删净），完成后若已无其他 uv 工具，再从用户 PATH 移除 `~/.local/bin` 条目（Windows 自动；macOS/Linux 打印待删的 shell 配置行指令、不自动改 rc）；
+4. 打印"程序将在退出后完成卸载"后正常退出。
+
+边界：`uv tool list` 中无本工具（如以 `uv run` 方式使用）时跳过工具卸载并说明；PATH 条目被其他 uv 工具共享时保留。中途任何一步拒绝都无副作用。
+
 ### 全局参数（chat / review 通用）
 
 参数跟在子命令之后（如 `cra chat --no-stream`；裸 `cra` 形式不带参数）。
@@ -182,7 +206,7 @@ uv run cra review a.py --json                   # 结构化 JSON 输出（stdout
 
 - `run_python` 在本机直接执行代码（**非沙箱、限时执行**：默认 10 秒，超时强制终止整棵进程树）：请勿在审查不可信代码时滥用执行功能。子进程环境经净化后继承（剔除 `SE_CodeAgent` 与 `*API_KEY*` 型变量），但子进程仍拥有当前用户全部权限。该限制同时明示于 `cra chat --help` / `cra review --help` 与工具 description；`--ask-exec` / `/confirm` 可开启逐次执行确认。
 - 审查支持任意文本型源码与配置文件；执行验证仅支持 Python（`run_python`），其他语言的结论以静态审查为准。
-- `~/.cra/models.json` 含明文 API key（见上文权限与备份注意事项）；api_key 只存在于用户侧配置文件与进程内存，不进入仓库、日志与子进程环境。
+- key 存储二选一（`cra config` 内选择）：环境变量（推荐，不落盘）或 `~/.cra/models.json` 明文（见上文权限与备份注意事项）；api_key 只存在于用户侧（配置文件/环境变量）与进程内存，不进入仓库、日志与子进程环境。
 - 审查意见由大模型生成，仅供参考，不能替代人工评审。
 
 ## 开发
@@ -206,6 +230,7 @@ uv run ruff check .  # 代码规范检查
 - [x] 批量审查多文件（`cra review` 多路径）
 - [x] 流式过程体验优化（行级流式 + 句级早发、过程/正文分层、`/process` 过程重放；设计见 docs/Design.md D15/D16）
 - [x] CLI 易用性（裸 `cra` 直接对话、`/setting` 设置菜单、`/exit`、会话自动保留 + `/resume`）
+- [x] 会话与配置便利性（首次配置引导、8 家供应商预设、key 环境变量存储、`/load` 列表选择与历史打印、`/delete`、`cra uninstall` 一键卸载）
 
 ---
 
