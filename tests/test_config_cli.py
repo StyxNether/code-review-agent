@@ -1,4 +1,4 @@
-"""cra config 交互式配置(§7.4)与 config test 连通性自检:全流程离线
+"""cra config 交互式配置与 config test 连通性自检:全流程离线
 (mock input/getpass/probe),经 home_dir 隔离用户目录。
 
 样例中的占位串均为明显假值(placeholder-*,非真实凭据),以变量构造写入,
@@ -34,6 +34,11 @@ def _entry_with_key(name: str, models: list[str]) -> dict:
     entry: dict[str, Any] = {"name": name, "base_url": "https://x.example.com", "models": models}
     entry["api_key"] = _PLACEHOLDER_KEY
     return entry
+
+
+def _ok_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+    """setx 打桩：恒成功（不真实写环境）。"""
+    return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
 
 def _run_config(monkeypatch: pytest.MonkeyPatch, inputs: list[str], keys: list[str] | None = None) -> None:
@@ -132,7 +137,7 @@ class TestConfigAddProvider:
     def test_write_notice_mentions_permissions_and_backup(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
     ) -> None:
-        """§7.4:首次写盘时提示文件权限与备份注意事项。"""
+        """首次写盘时提示文件权限与备份注意事项。"""
         _run_config(
             monkeypatch,
             ["1", "1", "deepseek", "", "deepseek-flash", "1", "0"],
@@ -168,7 +173,7 @@ class TestConfigProviders:
     def test_update_key(self, monkeypatch: pytest.MonkeyPatch, home_dir: Path) -> None:
         _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
 
-        # M8：key 输入后新增存储选择（回车 = 明文，现状行为）
+        # key 输入后的存储选择（回车 = 明文）
         _run_config(monkeypatch, ["5", "1", "1", "0"], keys=[_PLACEHOLDER_UPDATED])
 
         assert config.load_raw()["providers"][0]["api_key"] == _PLACEHOLDER_UPDATED
@@ -183,7 +188,7 @@ class TestConfigProviders:
     def test_manage_models_add_duplicate_asks_overwrite(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
     ) -> None:
-        """§7.4:同名模型已存在时询问是否覆盖(清单为纯名称,覆盖即确认保留)。
+        """同名模型已存在时询问是否覆盖(清单为纯名称,覆盖即确认保留)。
 
         覆盖询问经 input 提示呈现(mock 下不产生输出),以"保持不变"回执与
         清单不变断言该分支被走到。
@@ -366,6 +371,12 @@ class TestConfigPresets:
 class TestKeyStorageChoice:
     """M8 key 存储选择（D17）：明文（现状）或环境变量（models.json 不落明文）。"""
 
+    @pytest.fixture(autouse=True)
+    def _clean_provider_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """环境变量存储分支的用例不得受真实环境同名变量影响（否则会触发覆盖确认）。"""
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("MYPROV_API_KEY", raising=False)
+
     def test_plaintext_choice_keeps_current_behavior(
         self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
     ) -> None:
@@ -457,6 +468,90 @@ class TestKeyStorageChoice:
 
         assert "api_key" not in config.load_raw()["providers"][0]
         assert config.provider_env_var("My Provider") == "MY_PROVIDER_API_KEY"
+
+    def test_successful_env_write_registers_var(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """环境变量写入成功后登记变量名（卸载清理的依据）。"""
+        _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
+        monkeypatch.setattr(cli.subprocess, "run", _ok_run)
+        monkeypatch.setattr(cli.os, "environ", dict(os.environ))
+
+        _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
+
+        assert config.registered_env_vars() == ["DEEPSEEK_API_KEY"]
+
+
+class TestEnvVarOverwriteGuard:
+    """同名环境变量覆盖保护（D17 修订）：勿删用户已有变量，自己的直接更新。"""
+
+    @pytest.fixture(autouse=True)
+    def _clean_provider_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    def test_foreign_var_confirmed_overwrites_and_registers(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """同名变量非本程序所设：询问后答 y → setx 覆盖并登记（卸载时将清理它）。"""
+        _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-user-own")
+        monkeypatch.setattr(cli.subprocess, "run", _ok_run)
+        monkeypatch.setattr(cli.os, "environ", dict(os.environ))
+
+        # 存储选 2 后遇到覆盖确认，答 y
+        _run_config(monkeypatch, ["5", "1", "2", "y", "0"], keys=[_PLACEHOLDER_UPDATED])
+
+        assert config.registered_env_vars() == ["DEEPSEEK_API_KEY"]
+        assert os.environ["DEEPSEEK_API_KEY"] == _PLACEHOLDER_UPDATED
+        assert "api_key" not in config.load_raw()["providers"][0]
+
+    def test_foreign_var_declined_falls_back_to_plaintext(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """同名变量非本程序所设：拒绝覆盖 → key 回退明文、原变量值不动、不登记。"""
+        original = {"providers": [_entry_with_key("deepseek", ["m1"])]}
+        _write_models(home_dir, original)
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-user-own")
+        monkeypatch.setattr(cli.subprocess, "run", _ok_run)
+        monkeypatch.setattr(cli.os, "environ", dict(os.environ))
+
+        _run_config(monkeypatch, ["5", "1", "2", "n", "0"], keys=[_PLACEHOLDER_UPDATED])
+
+        entry = config.load_raw()["providers"][0]
+        assert entry["api_key"] == _PLACEHOLDER_UPDATED  # 回退明文，key 不丢
+        assert os.environ["DEEPSEEK_API_KEY"] == "placeholder-user-own"  # 用户原值未动
+        assert config.registered_env_vars() == []  # 未登记 → 卸载不会碰它
+
+    def test_owned_var_overwrites_without_asking(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """变量已是本程序登记在案的：更新 key 不再询问（避免每次改 key 都被打断）。"""
+        _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-previous")
+        config.register_env_var("DEEPSEEK_API_KEY")  # 之前由本程序设置
+        monkeypatch.setattr(cli.subprocess, "run", _ok_run)
+        monkeypatch.setattr(cli.os, "environ", dict(os.environ))
+
+        _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
+
+        assert os.environ["DEEPSEEK_API_KEY"] == _PLACEHOLDER_UPDATED  # 直接覆盖
+        assert config.registered_env_vars() == ["DEEPSEEK_API_KEY"]
+
+    def test_interrupt_at_overwrite_prompt_falls_back_to_plaintext(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """覆盖询问处中断（EOF/Ctrl+C）不是确认：回退明文、原变量不动。"""
+        original = {"providers": [_entry_with_key("deepseek", ["m1"])]}
+        _write_models(home_dir, original)
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-user-own")
+        monkeypatch.setattr(cli.subprocess, "run", _ok_run)
+        monkeypatch.setattr(cli.os, "environ", dict(os.environ))
+
+        _run_config(monkeypatch, ["5", "1", "2"], keys=[_PLACEHOLDER_UPDATED])  # 询问处 EOF
+
+        assert config.load_raw()["providers"][0]["api_key"] == _PLACEHOLDER_UPDATED
+        assert os.environ["DEEPSEEK_API_KEY"] == "placeholder-user-own"
+        assert config.registered_env_vars() == []
 
 
 class TestConfigTestChain:

@@ -1,5 +1,5 @@
-"""config 测试:环境变量读取与默认值解析(§6)、models.json 读写校验与 resolve
-解析优先级(§7.4)。全部经 home_dir fixture 隔离用户目录,无网络。
+"""config 测试:环境变量读取与默认值解析、models.json 读写校验与 resolve
+解析优先级。全部经 home_dir fixture 隔离用户目录,无网络。
 
 注:样例中的占位串均为明显假值(placeholder-*,非真实凭据),以变量构造写入,
 避免密钥扫描对测试样例字面量的误报(仓库密钥门禁见 AGENTS.md)。
@@ -80,7 +80,7 @@ def test_max_context_tokens_invalid_value_raises(monkeypatch: pytest.MonkeyPatch
         config.get_max_context_tokens()
 
 
-# ---- models.json(§7.4):加载、校验与保存 ----
+# ---- models.json:加载、校验与保存 ----
 
 
 def _provider_entry(name: str, base_url: str, models: list[str]) -> dict:
@@ -175,7 +175,7 @@ class TestSaveRaw:
         assert not (home_dir / ".cra" / "models.json").exists()
 
     def test_default_referencing_missing_provider_rejected_on_save(self, home_dir: Path) -> None:
-        """自审修复:写入侧做 default 引用完整性检查,问题在配置时即暴露。"""
+        """写入侧做 default 引用完整性检查,问题在配置时即暴露。"""
         bad = {"default": "ghost/m", "providers": _sample_providers()}
 
         with pytest.raises(config.ConfigError, match="ghost"):
@@ -188,7 +188,7 @@ class TestSaveRaw:
             config.save_raw(bad)
 
     def test_duplicate_provider_names_rejected(self, home_dir: Path) -> None:
-        """自审修复:供应商重名在加载/写入时拒绝(resolve 不再静默取第一个)。"""
+        """供应商重名在加载/写入时拒绝(resolve 不再静默取第一个)。"""
         bad = {
             "providers": [
                 _provider_entry("dup", "https://x", ["m"]),
@@ -200,7 +200,7 @@ class TestSaveRaw:
             config.save_raw(bad)
 
 
-# ---- resolve:解析优先级与边界规则(§7.4)----
+# ---- resolve:解析优先级与边界规则 ----
 
 
 class TestResolve:
@@ -293,21 +293,21 @@ class TestResolve:
         assert resolved.provider == "deepseek"
 
     def test_model_ambiguous_requires_provider(self, home_dir: Path) -> None:
-        """--model 跨供应商重名时必须同时给 --provider,否则报错(§7.4)。"""
+        """--model 跨供应商重名时必须同时给 --provider,否则报错。"""
         _write_models_json(home_dir, {"providers": _sample_providers()})
 
         with pytest.raises(config.ConfigError, match="--provider"):
             config.resolve(model="deepseek-flash")
 
     def test_model_unknown_with_providers_raises(self, home_dir: Path) -> None:
-        """--model 不在任何供应商清单内时报错(仅清单内匹配,§7.4)。"""
+        """--model 不在任何供应商清单内时报错(仅清单内匹配)。"""
         _write_models_json(home_dir, {"providers": _sample_providers()})
 
         with pytest.raises(config.ConfigError, match="清单"):
             config.resolve(model="outside-model")
 
     def test_default_referencing_deleted_provider_raises(self, home_dir: Path) -> None:
-        """default 引用的供应商被删除视为配置损坏,按运行错误退出 2(§7.4)。"""
+        """default 引用的供应商被删除视为配置损坏,按运行错误退出 2。"""
         _write_models_json(home_dir, {"default": "ghost/whatever", "providers": _sample_providers()})
 
         with pytest.raises(config.ConfigError, match="ghost"):
@@ -338,7 +338,7 @@ class TestResolve:
             config.resolve()
 
 
-# ---- M8:供应商预设、变量名生成与 key 三级回退链(D17/§10 M8)----
+# ---- 供应商预设、变量名生成与 key 三级回退链 ----
 
 
 class TestProviderPresets:
@@ -355,7 +355,7 @@ class TestProviderPresets:
             assert preset.env_var.endswith("_API_KEY")
 
     def test_first_preset_is_deepseek(self) -> None:
-        """清单序与 §10 M8 表一致：DeepSeek 为第 1 家预设。"""
+        """预设清单序与设计表一致：DeepSeek 为第 1 家预设。"""
         first = config.PROVIDER_PRESETS[0]
         assert first.name == "DeepSeek"
         assert first.base_url == "https://api.deepseek.com"
@@ -374,7 +374,7 @@ class TestEnvVarGeneration:
         assert config.env_var_for_provider("智谱 AI") == "AI_API_KEY"  # 部分非 ASCII 仍按规则
 
     def test_pure_non_ascii_names_get_unique_stable_vars(self) -> None:
-        """纯非 ASCII 名剥离后为空：以名称摘要生成唯一变量名（cra 自审复核）。
+        """纯非 ASCII 名剥离后为空：以名称摘要生成唯一变量名。
 
         不同供应商不得共用同一兜底名——否则环境变量 key 串用会把一家凭据发给
         另一家的接入点；同名则必须稳定一致（重复配置写回同一变量）。
@@ -437,3 +437,34 @@ class TestResolveKeyChain:
 
         assert resolved is not None
         assert resolved.api_key == _PLACEHOLDER_ENV
+
+
+class TestEnvRegistry:
+    """环境变量登记层（设置时登记、卸载时只清登记在案的变量）。"""
+
+    def test_register_roundtrip_and_dedupe(self, home_dir: Path) -> None:
+        config.register_env_var("DEEPSEEK_API_KEY")
+        config.register_env_var("MY_KEY")
+        config.register_env_var("DEEPSEEK_API_KEY")  # 重复登记去重
+
+        assert config.registered_env_vars() == ["DEEPSEEK_API_KEY", "MY_KEY"]
+        assert config.env_registry_path().name == "env-vars.json"
+        assert config.env_registry_path().exists()
+
+    def test_registry_missing_returns_empty(self, home_dir: Path) -> None:
+        assert config.registered_env_vars() == []
+
+    def test_registry_broken_returns_empty(self, home_dir: Path) -> None:
+        """登记文件损坏（手改坏）按空清单处理：卸载侧保守跳过，绝不误删。"""
+        path = config.env_registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken", encoding="utf-8")
+
+        assert config.registered_env_vars() == []
+
+    def test_registry_ignores_non_string_entries(self, home_dir: Path) -> None:
+        path = config.env_registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"env_vars": ["OK_VAR", 3, null, ""]}', encoding="utf-8")
+
+        assert config.registered_env_vars() == ["OK_VAR"]

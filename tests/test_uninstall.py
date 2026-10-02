@@ -1,4 +1,4 @@
-"""cra uninstall（§7.1/§10 M8）：两道确认分支、数据删除、分离任务命令拼装与 PATH 判定。
+"""cra uninstall：两道确认分支、数据删除、分离任务命令拼装与 PATH 判定。
 
 subprocess 一律 mock——绝不真实执行 uv/卸载/PATH 修改；用户目录经 home_dir 隔离。
 """
@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from cra import cli
 
@@ -283,7 +284,7 @@ class TestUvToolNames:
 
 
 class TestUninstallWiring:
-    """§7.1 入口接线：子命令解析与 main 分发。"""
+    """入口接线：子命令解析与 main 分发。"""
 
     def test_uninstall_subcommand_parses(self) -> None:
         args = cli._build_parser().parse_args(["uninstall"])
@@ -319,7 +320,7 @@ class TestUninstallWiring:
     def test_delete_user_data_refuses_unexpected_dir(
         self, capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """删除目标名非 .cra 时拒绝执行（config 路径演化下的误删护栏，cra 自审复核）。"""
+        """删除目标名非 .cra 时拒绝执行（config 路径演化下的误删护栏）。"""
         rogue = tmp_path / "elsewhere"
         rogue.mkdir()
         (rogue / "models.json").write_text("{}", encoding="utf-8")
@@ -329,6 +330,164 @@ class TestUninstallWiring:
 
         assert rogue.exists()
         assert "已取消删除" in capsys.readouterr().out
+
+
+def _patch_run_split(
+    monkeypatch: pytest.MonkeyPatch, uv_stdout: str
+) -> tuple[list[list[str]], list[list[str]]]:
+    """按命令分流 mock run：uv tool list 返回 uv_stdout，powershell 返回成功。"""
+    run_calls: list[list[str]] = []
+    ps_calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        run_calls.append(list(cmd))
+        if cmd[0] == "powershell":
+            ps_calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=uv_stdout, stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    return run_calls, ps_calls
+
+
+class TestUninstallEnvVars:
+    """卸载清理程序自己设置的环境变量（登记在案），绝不触碰用户已有的变量。"""
+
+    def _seed_registry(self, home_dir: Path, *names: str) -> None:
+        from cra import config
+
+        (home_dir / ".cra").mkdir(parents=True, exist_ok=True)
+        for name in names:
+            config.register_env_var(name)
+
+    def test_cleanup_confirmed_by_default(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """登记在案的变量在数据确认后默认清理：powershell 清用户环境 + 当前进程 pop。"""
+        self._seed_registry(home_dir, "DEEPSEEK_API_KEY", "MY_KEY")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-a")
+        monkeypatch.setenv("MY_KEY", "placeholder-b")
+        _patch_popen(monkeypatch)
+        _patch_run_split(monkeypatch, "code-review-agent v0.1.0\n- cra\n")
+        # 确认1 y → 数据 ""（删）→ 环境变量 ""（删）
+        monkeypatch.setattr("builtins.input", _feed(["y", "", ""]))
+
+        cli._run_uninstall()
+
+        out = capsys.readouterr().out
+        assert "DEEPSEEK_API_KEY, MY_KEY" in out  # 清单明示变量名
+        assert "已删除 2 个本程序设置的环境变量" in out
+        assert "DEEPSEEK_API_KEY" not in os.environ  # 当前进程也清掉
+        assert "MY_KEY" not in os.environ
+        assert "程序将在退出后完成卸载" in out
+
+    def test_cleanup_script_targets_registered_vars(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """清理命令只含登记清单内的变量名（powershell 脚本逐字核对）。"""
+        self._seed_registry(home_dir, "DEEPSEEK_API_KEY", "MY_KEY")
+        _patch_popen(monkeypatch)
+        _run_calls, ps_calls = _patch_run_split(
+            monkeypatch, "code-review-agent v0.1.0\n- cra\n"
+        )
+        monkeypatch.setattr("builtins.input", _feed(["y", "", ""]))
+
+        cli._run_uninstall()
+
+        assert len(ps_calls) == 1
+        script = ps_calls[0][-1]
+        assert "'DEEPSEEK_API_KEY'" in script and "'MY_KEY'" in script
+        assert "[Environment]::SetEnvironmentVariable($name, $null, 'User')" in script
+        assert any(cmd[0] == "uv" for cmd in _run_calls)  # uv tool list 仍被用于工具判定
+
+    def test_cleanup_declined_keeps_vars(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """环境变量确认答 n：变量保留（进程与用户环境都不动），工具卸载照常。"""
+        self._seed_registry(home_dir, "MY_KEY")
+        monkeypatch.setenv("MY_KEY", "placeholder-a")
+        _patch_popen(monkeypatch)
+        _patch_run_split(monkeypatch, "code-review-agent v0.1.0\n- cra\n")
+        monkeypatch.setattr("builtins.input", _feed(["y", "n", "n"]))
+
+        cli._run_uninstall()
+
+        out = capsys.readouterr().out
+        assert "环境变量已保留" in out
+        assert os.environ["MY_KEY"] == "placeholder-a"
+        assert "程序将在退出后完成卸载" in out
+
+    def test_cleanup_interrupt_keeps_vars(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """环境变量确认处 EOF/Ctrl+C 不是确认：保留（中断不是确认的统一语义）。"""
+        self._seed_registry(home_dir, "MY_KEY")
+        monkeypatch.setenv("MY_KEY", "placeholder-a")
+        _patch_popen(monkeypatch)
+        _patch_run_split(monkeypatch, "code-review-agent v0.1.0\n- cra\n")
+        monkeypatch.setattr("builtins.input", _feed(["y", "n"]))  # 环境变量确认处 EOF
+
+        cli._run_uninstall()
+
+        out = capsys.readouterr().out
+        assert "输入已中断，环境变量已保留" in out
+        assert os.environ["MY_KEY"] == "placeholder-a"
+
+    def test_no_registry_skips_env_step(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """无登记清单：跳过环境变量步骤（不多问一道），明示不触碰用户自设变量。"""
+        _seed_user_data(home_dir)
+        _patch_popen(monkeypatch)
+        run_calls, ps_calls = _patch_run_split(monkeypatch, "code-review-agent v0.1.0\n- cra\n")
+        monkeypatch.setattr("builtins.input", _feed(["y", "n"]))  # 只有两道既有确认
+
+        cli._run_uninstall()
+
+        out = capsys.readouterr().out
+        assert "未发现本程序登记的环境变量" in out
+        assert "SE_CodeAgent" in out  # 明示用户自设变量不被动
+        assert ps_calls == []  # 未做环境清理
+        assert any(cmd[0] == "uv" for cmd in run_calls)
+
+    def test_cleanup_filters_invalid_registry_names(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """登记文件被手改进非法名：不进脚本（防命令注入），提示手工检查。"""
+        (home_dir / ".cra").mkdir(parents=True, exist_ok=True)
+        registry = home_dir / ".cra" / "env-vars.json"
+        registry.write_text('{"env_vars": ["OK_VAR", "bad; name"]}', encoding="utf-8")
+        monkeypatch.setenv("OK_VAR", "placeholder-a")
+        _patch_popen(monkeypatch)
+        _patch_run_split(monkeypatch, "code-review-agent v0.1.0\n- cra\n")
+        monkeypatch.setattr("builtins.input", _feed(["y", "n", ""]))
+
+        cli._run_uninstall()
+
+        out = capsys.readouterr().out
+        assert "bad; name" in out  # 提示手工检查
+        assert "已删除 1 个本程序设置的环境变量" in out
+        assert "OK_VAR" not in os.environ
+
+    def test_windows_script_content(self) -> None:
+        script = cli._windows_env_cleanup_script(["A_B", "C"])
+
+        assert "foreach ($name in @('A_B', 'C'))" in script
+        assert "[Environment]::SetEnvironmentVariable($name, $null, 'User')" in script
+
+    def test_posix_prints_rc_hint_and_pops_process_env(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """POSIX：当前进程 pop；持久化行打印待删指引（不自动改 rc）。"""
+        monkeypatch.setenv("MY_KEY", "placeholder-a")
+        monkeypatch.setattr(cli.sys, "platform", "linux")
+
+        cli._cleanup_env_vars(Console(), ["MY_KEY"])
+
+        out = capsys.readouterr().out
+        assert "请手工删除对应行" in out
+        assert "MY_KEY" in out
+        assert "MY_KEY" not in os.environ
 
 
 def capsys_console(capsys: pytest.CaptureFixture[str]) -> Any:

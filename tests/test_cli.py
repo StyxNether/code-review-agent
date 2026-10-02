@@ -34,13 +34,13 @@ class TestParser:
         assert args.command == "chat"
 
     def test_missing_subcommand_yields_none_for_bare_entry(self) -> None:
-        """M7 裸入口：子命令可选化，缺省 command=None 由 main 进入 chat REPL（§7.1）。"""
+        """裸入口：子命令可选化，缺省 command=None 由 main 进入 chat REPL。"""
         args = _build_parser().parse_args([])
 
         assert args.command is None
 
     def test_bare_entry_defaults_match_chat_subcommand(self) -> None:
-        """自审锁定：chat 子解析器的参数缺省值必须与 main 裸入口的 getattr 缺省一致，
+        """chat 子解析器的参数缺省值必须与 main 裸入口的 getattr 缺省一致，
         否则裸 cra 与 cra chat 行为静默分叉（main 注释所指的不变量）。"""
         from cra.agent import MAX_TOOL_ROUNDS
 
@@ -75,7 +75,7 @@ class TestParser:
     def test_chat_help_declares_non_sandbox_and_timeout(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """§8.2 核对项：非沙箱、限时执行的限制声明在 CLI 层面可见。"""
+        """非沙箱、限时执行的限制声明在 CLI 层面可见。"""
         with pytest.raises(SystemExit) as excinfo:
             _build_parser().parse_args(["chat", "--help"])
 
@@ -86,9 +86,9 @@ class TestParser:
 
 
 class TestSetupGuide:
-    """M3 挂账：key 指引跨平台化；输出统一经 rich Console（不再混用 print）。
+    """key 指引按平台给出；输出统一经 rich Console（不再混用 print）。
 
-    M5：无任何配置时的引导改为 _print_config_guide（§5/§7.4，含 cra config 指引）。
+    无任何配置时的引导走 _print_config_guide（含 cra config 指引）。
     """
 
     def test_windows_hint_mentions_setx(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,7 +121,7 @@ class _FakeAgent:
 
     def __init__(self, **_kwargs: Any) -> None:
         self.model = "m-one"
-        self.provider = "prov"  # 当前供应商（M8 /change model 的"当前使用中"标记数据源）
+        self.provider = "prov"  # 当前供应商（/change model 的"当前使用中"标记数据源）
         self.reset_calls = 0
         self.turns: list[str] = []
         self.switched: list[Any] = []
@@ -167,12 +167,12 @@ class _FakeAgent:
 
 
 class TestRunChat:
-    """M3 挂账：_run_chat 的 sys.exit 路径与 REPL 内置命令可测（mock input/Agent）。"""
+    """_run_chat 的 sys.exit 路径与 REPL 内置命令可测（mock input/Agent）。"""
 
     def test_missing_key_exits_with_guide(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """§5/§7.5：无任何配置打印 cra config 引导后退出 2（M5 起退出码从 1 改 2）。"""
+        """无任何配置打印 cra config 引导后退出 2。"""
         monkeypatch.delenv("SE_CodeAgent", raising=False)
 
         with pytest.raises(SystemExit) as excinfo:
@@ -228,7 +228,7 @@ class TestRunChat:
 
         cli._run_chat()
 
-        # 空输入/纯空白只重新提示，不发起对话轮次（§6）
+        # 空输入/纯空白只重新提示，不发起对话轮次
         assert _FakeAgent.last is not None
         assert _FakeAgent.last.turns == []
         assert capsys.readouterr().out.count("你>") == 3
@@ -236,7 +236,7 @@ class TestRunChat:
     def test_narration_flushed_before_tool_mark_and_answer_separate(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """M4 验收反馈：过程性叙述跟随工具轮实时暗色显示，不与最终回答堆叠。"""
+        """过程性叙述跟随工具轮实时暗色显示，不与最终回答堆叠。"""
         monkeypatch.setenv("SE_CodeAgent", "sk-test")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         inputs = iter(["审查 x.py", "exit"])
@@ -253,7 +253,7 @@ class TestRunChat:
 
 
 def test_inline_marker_kept_on_one_line() -> None:
-    """回归（验收走查实测）：行内标记不再被 Markdown 片段自带换行拆成多行。"""
+    """行内标记不再被 Markdown 片段自带换行拆成多行。"""
     out = _render_segment("这里有个问题【严重】需要修复。")
 
     lines = [line for line in out.splitlines() if line.strip()]
@@ -313,7 +313,7 @@ class _SilentAgent:
 def test_no_delta_answer_falls_back_to_return_value(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """验收走查建议：兼容端点不返回文本增量时，界面用返回值兜底而非空白。"""
+    """兼容端点不返回文本增量时，界面用返回值兜底而非空白。"""
     monkeypatch.setenv("SE_CodeAgent", "sk-test")
     monkeypatch.setattr(cli, "Agent", _SilentAgent)
     inputs = iter(["问", "exit"])
@@ -443,7 +443,7 @@ def test_tilde_fence_hold_and_interior_blank_lines() -> None:
 
 
 def test_longer_fence_not_closed_by_inner_short_fence() -> None:
-    """```` 围栏内部的 ``` 不闭合围栏（M2 回归的行级等价）。"""
+    """```` 围栏内部的 ``` 不闭合围栏。"""
     console = _stream_console()
     streamer = _StreamingMarkdown(console)
     streamer.feed("````md\nx\n\n```\n````\n\nb\n")
@@ -453,9 +453,8 @@ def test_longer_fence_not_closed_by_inner_short_fence() -> None:
 
 
 def test_fence_after_blank_line_in_single_feed() -> None:
-    """cra 自审严重项回归：空行消费后的缓冲切片曾使围栏开栏偏移坐标失配，
-    一次投喂（--no-stream 与返回值兜底路径的形态）时围栏被拆成普通行。
-    修复 = 空行分支同步平移 limit。"""
+    """空行消费使缓冲起点前移后，围栏开栏偏移 limit 须同步平移，
+    否则一次投喂（--no-stream 与返回值兜底路径的形态）时围栏被拆成普通行。"""
     console = _stream_console()
     streamer = _StreamingMarkdown(console)
     streamer.feed("前言。\n\n```python\nprint('hi')\n```\n")
@@ -473,7 +472,7 @@ def test_in_fence_state() -> None:
     assert _in_fence("~~~\nx\n```")  # 字符不同的围栏不互相闭合
 
 
-# ---- M6:行级单元流式、句级早发、暂扣分类与分层样式(Design.md D15/D16) ----
+# ---- 行级单元流式、句级早发、暂扣分类与分层样式 ----
 
 
 def _stream_console() -> Console:
@@ -481,7 +480,7 @@ def _stream_console() -> Console:
 
 
 def test_complete_lines_render_before_finish() -> None:
-    """行级粒度:完整行即时落盘,不等 finish——段落批渲染是 M4 验收的主投诉。"""
+    """行级粒度:完整行即时落盘,不等 finish。"""
     console = _stream_console()
     streamer = _StreamingMarkdown(console)
     streamer.feed("第一行。\n第二行。\n")
@@ -551,7 +550,7 @@ def test_table_group_renders_as_table() -> None:
 
 
 def test_paragraph_blank_line_spacing_preserved() -> None:
-    """段落间空行(M1 验收反馈的既有行为)在行级流式下保持。"""
+    """段落间空行在行级流式下保持。"""
     console = _stream_console()
     streamer = _StreamingMarkdown(console)
     streamer.feed("段一。\n\n段二。\n")
@@ -609,7 +608,7 @@ def test_process_events_recorded_for_replay() -> None:
 
 
 class TestMarkerStyling:
-    """M2 验收反馈：分级标记红/黄/绿、修改建议加粗。"""
+    """分级标记红/黄/绿、修改建议加粗。"""
 
     def test_style_mapping(self) -> None:
         assert _marker_style("【严重】") == "bold red"
@@ -645,7 +644,7 @@ class TestSeverityRendering:
         assert "\x1b[1;32m【建议】" in out  # 绿色
 
     def test_marker_after_cjk_letter_styled_without_literal_asterisks(self) -> None:
-        """回归（M2 修复轮）：中文后紧跟的标记也必须加粗——CommonMark flanking
+        """中文后紧跟的标记也必须加粗——CommonMark flanking
         规则会漏掉 `中文**【标记】**中文`，故渲染不依赖 ** 插入。"""
         out = _render_segment("前文【严重】中缀出现。")
 
@@ -676,7 +675,7 @@ class TestSeverityRendering:
         assert "`code`" not in out
 
 
-# ---- M5:REPL 命令族(§7.3)与全局参数(§7.2)----
+# ---- REPL 命令族与全局参数 ----
 
 # 测试占位值(明显假值,非真实凭据);以变量构造避免密钥扫描对字面量的误报
 _PLACEHOLDER_KEY = "placeholder-a"
@@ -700,7 +699,7 @@ def _provider_models_json() -> dict:
 
 
 class TestReplCommands:
-    """§7.3 内置命令族:/help /save /load /undo /context /export /confirm /model。"""
+    """内置命令族:/help /save /load /undo /context /export /confirm /model。"""
 
     def _repl(
         self,
@@ -730,7 +729,7 @@ class TestReplCommands:
     def test_process_replays_last_turn_events(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """/process:最近一轮的叙述/工具/结果按序重放(可折叠的替代方案,§10 M6)。"""
+        """/process:最近一轮的叙述/工具/结果按序重放（紧凑打点的按需展开）。"""
         out = self._repl(monkeypatch, capsys, ["审查", "/process", "exit"])
 
         assert "过程明细" in out
@@ -766,7 +765,7 @@ class TestReplCommands:
         capsys: pytest.CaptureFixture[str],
         home_dir: Path,
     ) -> None:
-        """M8：/load 省略名称列出会话数字选择；加载成功自动打印全部会话历史。"""
+        """/load 省略名称列出会话数字选择；加载成功自动打印全部会话历史。"""
         seeded = [
             {"type": "human", "data": {"content": "早前的问题"}},
             {"type": "ai", "data": {"content": "早前的回答"}},
@@ -788,7 +787,7 @@ class TestReplCommands:
     def test_load_without_name_cancel_returns_to_repl(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
     ) -> None:
-        """M8：列表选择处回车取消，会话不变。"""
+        """列表选择处回车取消，会话不变。"""
         sessions_dir = home_dir / ".cra" / "sessions"
         sessions_dir.mkdir(parents=True)
         (sessions_dir / "alpha.json").write_text("[]", encoding="utf-8")
@@ -907,7 +906,7 @@ class TestReplCommands:
         capsys: pytest.CaptureFixture[str],
         tmp_path: Any,
     ) -> None:
-        """M8：清单标注"当前使用中"（_FakeAgent 当前为 prov/m-one）。"""
+        """清单标注"当前使用中"（_FakeAgent 当前为 prov/m-one）。"""
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
         _write_models_json(tmp_path, _provider_models_json())
@@ -935,10 +934,10 @@ class TestReplCommands:
 
 
 class TestCliArgs:
-    """§7.1/§7.2:子命令与全局参数解析。"""
+    """子命令与全局参数解析。"""
 
     def test_parse_index_rejects_zero_negative_and_non_ascii_digits(self) -> None:
-        """自审修复:0/负数/上标数字(isdigit 为 True 但 int 接受集不一致)全拒绝。"""
+        """0/负数/上标数字(isdigit 为 True 但 int 接受集不一致)全拒绝。"""
         assert cli._parse_index("0", 3) is None
         assert cli._parse_index("-1", 3) is None
         assert cli._parse_index("²", 3) is None  # isdigit()==True 但 int() 抛错
@@ -979,7 +978,7 @@ class TestCliArgs:
         assert args.paths == ["-"]
 
     def test_review_accepts_ask_exec_flag_for_explicit_error(self) -> None:
-        """review 接受 --ask-exec 解析,由 main 以中文报错退出 2(§7.2)。"""
+        """review 接受 --ask-exec 解析,由 main 以中文报错退出 2。"""
         args = _build_parser().parse_args(["review", "a.py", "--ask-exec"])
 
         assert args.ask_exec is True
@@ -989,7 +988,7 @@ class TestCliArgs:
         assert _build_parser().parse_args(["config", "test"]).config_action == "test"
 
 
-# ---- M7:裸入口、/setting 菜单、/exit、会话自动保留与 /resume(§7.1/§7.3)----
+# ---- 裸入口、/setting 菜单、/exit、会话自动保留与 /resume ----
 
 
 class _EmptyDumpAgent(_FakeAgent):
@@ -1020,7 +1019,7 @@ def _seed_last(home: Path, data: Any) -> None:
 
 
 class TestExitAndSetting:
-    """/exit 等价退出与 /setting 菜单分发（M7）：菜单复用既有命令实现（mock 验证映射）。"""
+    """/exit 等价退出与 /setting 菜单分发：菜单复用既有命令实现（mock 验证映射）。"""
 
     def _repl(
         self,
@@ -1037,7 +1036,7 @@ class TestExitAndSetting:
     def test_slash_exit_ends_repl(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """/exit 与 exit 等价退出（§7.3 M7）。"""
+        """/exit 与 exit 等价退出。"""
         out = self._repl(monkeypatch, capsys, ["/exit"])
 
         assert "再见" in out
@@ -1131,7 +1130,7 @@ class TestExitAndSetting:
         capsys: pytest.CaptureFixture[str],
         home_dir: Path,
     ) -> None:
-        """M8：菜单 3) 回车自动以时间戳命名保存（%Y%m%d-%H%M%S）。"""
+        """菜单 3) 回车自动以时间戳命名保存（%Y%m%d-%H%M%S）。"""
         out = self._repl(monkeypatch, capsys, ["/setting", "3", "", "0", "exit"])
 
         names = [p.stem for p in (home_dir / ".cra" / "sessions").glob("*.json")]
@@ -1144,7 +1143,7 @@ class TestExitAndSetting:
         capsys: pytest.CaptureFixture[str],
         home_dir: Path,
     ) -> None:
-        """M8：菜单 4) 回车列出会话数字选择（_cmd_load 空名分支），取消回菜单。"""
+        """菜单 4) 回车列出会话数字选择（_cmd_load 空名分支），取消回菜单。"""
         sessions_dir = home_dir / ".cra" / "sessions"
         sessions_dir.mkdir(parents=True)
         (sessions_dir / "alpha.json").write_text("[]", encoding="utf-8")
@@ -1188,7 +1187,7 @@ class TestExitAndSetting:
 
 
 class TestSessionAutosave:
-    """会话自动保留与 /resume（§7.3 M7）：退出写 _last、启动提示、/resume 恢复。"""
+    """会话自动保留与 /resume：退出写 _last、启动提示、/resume 恢复。"""
 
     @staticmethod
     def _last_path(home_dir: Path) -> Path:
@@ -1237,7 +1236,7 @@ class TestSessionAutosave:
         capsys: pytest.CaptureFixture[str],
         home_dir: Path,
     ) -> None:
-        """EOF 退出同样触发自动保留（§7.3：任何方式退出）。"""
+        """EOF 退出同样触发自动保留（任何方式退出）。"""
         data = json.loads(
             self._run_and_read(monkeypatch, capsys, home_dir, ["审查 x"])
         )
@@ -1272,7 +1271,7 @@ class TestSessionAutosave:
     def test_autosave_failure_does_not_block_exit(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """写盘失败只提示、不阻断退出（§7.3：失败仅提示不阻断退出）。"""
+        """写盘失败只提示、不阻断退出（失败仅提示不阻断退出）。"""
 
         def boom(_path: Any, _data: Any) -> None:
             raise OSError("disk full")
@@ -1344,15 +1343,15 @@ class TestSessionAutosave:
         assert _FakeAgent.last.loaded == []
 
     def test_session_path_accepts_leading_underscore(self, home_dir: Path) -> None:
-        """_last 存档名（下划线开头）在 sessions 层合法（M7 放宽首字符类）。"""
+        """_last 存档名（下划线开头）在 sessions 层合法。"""
         assert sessions.session_path("_last").name == "_last.json"
 
 
-# ---- M8:首次配置引导、/delete 会话删除(§5/§7.3)----
+# ---- 首次配置引导、/delete 会话删除 ----
 
 
 class TestFirstRunSetup:
-    """M8 首次配置引导（§5）：确认 → 引导式配置 → 进入 REPL；拒绝 → 指引 + 退出 2。"""
+    """首次配置引导：确认 → 引导式配置 → 进入 REPL；拒绝 → 指引 + 退出 2。"""
 
     def test_decline_prints_guide_and_exits_2(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1378,6 +1377,8 @@ class TestFirstRunSetup:
         """DoD 演示路径：Y → DeepSeek 预设 → 回车 base_url → 回车预填 → key →
         环境变量存储 → 自动设默认 → 进入 REPL。"""
         monkeypatch.delenv("SE_CodeAgent", raising=False)
+        # 真实环境若已有 DEEPSEEK_API_KEY 会触发覆盖确认、使输入序列错位
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         run_calls: list[list[str]] = []
 
         def fake_run(cmd: list[str], **_kwargs: Any) -> Any:
@@ -1410,7 +1411,7 @@ class TestFirstRunSetup:
 
 
 class TestDeleteSession:
-    """/delete（§7.3 M8）：列表数字选择 + y/N 确认；_last 同样可删。"""
+    """/delete：列表数字选择 + y/N 确认；_last 同样可删。"""
 
     def _repl(
         self,
