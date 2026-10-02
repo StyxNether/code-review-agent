@@ -148,11 +148,13 @@ def registered_env_vars() -> list[str]:
 
 
 def register_env_var(name: str) -> None:
-    """登记一个由本程序 setx 写入的环境变量名（去重、原子替换）。
+    """登记一个由本程序写入的环境变量名（去重、原子替换）。
 
-    写盘失败上抛 OSError，由调用方提示——登记缺失会导致卸载时无法自动清理
-    该变量，须让用户知晓后手工处理。读-改-写未加跨进程锁：单用户 CLI 的
-    并发登记（同时开两个 cra config）理论上可能丢一次登记，属可接受边界。
+    Windows 为 setx 持久写入；POSIX 为当前进程即时设置（持久化取决于用户
+    是否执行 export，登记项在卸载时用于打印待删行指引）。写盘失败上抛
+    OSError，由调用方提示——登记缺失会导致卸载时无法自动清理该变量，须让
+    用户知晓后手工处理。读-改-写未加跨进程锁：单用户 CLI 的并发登记（同时
+    开两个 cra config）理论上可能丢一次登记，属可接受边界。
     """
     names = registered_env_vars()
     if name in names:

@@ -579,3 +579,20 @@ class TestConfigTestChain:
 
         assert excinfo.value.code == 0
         assert calls[0]["api_key"] == "placeholder-provider-env"
+
+def test_register_env_var_failure_warns_without_raising(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """登记失败（任何异常）只降级为警告，不阻塞已成功的 key 写入流程。"""
+    from rich.console import Console
+
+    def boom(_name: str) -> None:
+        raise RuntimeError("登记文件写入失败")
+
+    monkeypatch.setattr(cli.config, "register_env_var", boom)
+
+    cli._register_env_var(Console(), "MY_KEY")
+
+    out = capsys.readouterr().out
+    assert "环境变量登记失败" in out
+    assert "MY_KEY" in out

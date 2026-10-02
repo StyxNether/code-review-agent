@@ -95,6 +95,11 @@ class TestCollectReviewFiles:
         with pytest.raises(cli._ReviewFileError, match="路径不存在"):
             cli._collect_review_files([str(tmp_path / "ghost.py")])
 
+    def test_textual_sniff_io_failure_assumes_text(self, tmp_path: Path) -> None:
+        """嗅探读取失败（如路径不可达）按文本处理：真实读取在后续步骤报可读错误，
+        不把 IO 故障伪装成"二进制文件"。"""
+        assert cli._looks_textual(tmp_path / "ghost.bin") is True
+
     def test_stdin_marker_reads_stdin(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "stdin", io.StringIO("print('from stdin')"))
 

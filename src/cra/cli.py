@@ -1349,10 +1349,14 @@ def _write_env_var_key(console: Console, var: str, key: str) -> bool:
 
 
 def _register_env_var(console: Console, var: str) -> None:
-    """登记本程序写入的环境变量名；失败不阻塞 key 设置，但须明示后果（卸载清单缺项）。"""
+    """登记本程序写入的环境变量名；失败不阻塞 key 设置，但须明示后果（卸载清单缺项）。
+
+    契约是"登记失败只降级为警告"：登记文件损坏或磁盘异常都不应让已成功的
+    key 写入流程中断。
+    """
     try:
         config.register_env_var(var)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 — 登记是尽力而为的辅助数据，任何失败都不得阻塞 key 设置
         console.print(
             f"环境变量登记失败：{exc}——卸载时将无法自动清理 {var}，请记于手工清理。",
             style="yellow",
@@ -1883,7 +1887,7 @@ def _cleanup_env_vars(console: Console, names: list[str]) -> bool:
             f"已从当前进程清除 {len(safe)} 个变量；持久化的 export 行请按上方指引手工删除。",
             markup=False,
         )
-    return True
+    return not skipped
 
 
 def _run_uninstall() -> None:
@@ -1947,9 +1951,19 @@ def _run_uninstall() -> None:
         else:
             env_cleaned = _cleanup_env_vars(console, registered)  # 回车（默认 Y）或显式 y
     else:
-        console.print(
-            "未发现本程序登记的环境变量；SE_CodeAgent 等您自行设置的变量不会被动。", markup=False
-        )
+        if config.env_registry_path().exists():
+            # 登记文件存在却读不出有效清单：与"确实无登记"分开提示，避免
+            # 本程序设置过的变量因文件损坏而漏清理且无人知晓
+            console.print(
+                "环境变量登记文件存在但内容为空或已损坏，无法自动识别本程序设置过的变量；"
+                "请手工核对待删除项。",
+                markup=False,
+            )
+        else:
+            console.print(
+                "未发现本程序登记的环境变量；SE_CodeAgent 等您自行设置的变量不会被动。",
+                markup=False,
+            )
         env_cleaned = True
     tools = _uv_tool_names()
     others = [name for name in tools if name != _UNINSTALL_PACKAGE]
@@ -1970,7 +1984,7 @@ def _run_uninstall() -> None:
         console.print(f'  export PATH="$HOME/{_UV_BIN_DIRNAME}:$PATH"', markup=False)
     if spawned and not env_cleaned:
         console.print(
-            "注意：环境变量未能全部自动清理，请按上方提示手工处理后，程序再退出完成卸载。",
+            "注意：环境变量未能全部自动清理，后台卸载任务不受影响；请按上方提示手工清理。",
             style="yellow",
             markup=False,
         )
@@ -1995,12 +2009,16 @@ _TEXT_SNIFF_BYTES = 8192  # 二进制嗅探采样窗口：文件头部含 null �
 
 
 def _looks_textual(path: Path) -> bool:
-    """采样文件头部判断是否为文本文件（null 字节嗅探，与 read_file 同判据）。"""
+    """采样文件头部判断是否为文本文件（null 字节嗅探，与 read_file 同判据）。
+
+    嗅探读取失败（权限等）按"是文本"处理：后续真正的读取会用可读错误如实
+    报告原因，不在这里把 IO 故障伪装成"二进制文件"误导用户。
+    """
     try:
         with path.open("rb") as handle:
             return b"\x00" not in handle.read(_TEXT_SNIFF_BYTES)
     except OSError:
-        return False
+        return True
 
 
 def _collect_review_files(paths: list[str]) -> list[tuple[str, str]]:
@@ -2033,7 +2051,7 @@ def _collect_review_files(paths: list[str]) -> list[tuple[str, str]]:
                 detail = f"（已跳过：{', '.join(skipped)}）" if skipped else ""
                 raise _ReviewFileError(f"目录 {path} 第一层没有可审查的文本文件{detail}。")
             if skipped:
-                print(f"已跳过二进制或隐藏文件：{', '.join(skipped)}", file=sys.stderr)
+                print(f"已跳过二进制文件：{', '.join(skipped)}", file=sys.stderr)
             collected.extend((str(item), _read_review_text(item)) for item in selected)
         else:
             collected.append((str(path), _read_review_text(path)))

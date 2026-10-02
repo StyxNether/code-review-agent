@@ -469,6 +469,38 @@ class TestUninstallEnvVars:
         assert "已删除 1 个本程序设置的环境变量" in out
         assert "OK_VAR" not in os.environ
 
+    def test_corrupt_registry_warns_instead_of_no_registration(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """登记文件损坏时不与"确实无登记"混同：提示手工核对，避免自设变量漏清理无人知晓。"""
+        (home_dir / ".cra").mkdir(parents=True, exist_ok=True)
+        (home_dir / ".cra" / "env-vars.json").write_text("{broken", encoding="utf-8")
+        _patch_popen(monkeypatch)
+        uv_list = "code-review-agent v0.1.0" + chr(10) + "- cra" + chr(10)
+        _patch_run_split(monkeypatch, uv_list)
+        monkeypatch.setattr("builtins.input", _feed(["y", "n"]))
+
+        cli._run_uninstall()
+
+        out = capsys.readouterr().out
+        assert "为空或已损坏" in out
+        assert "无法自动识别" in out
+
+    def test_cleanup_partial_invalid_returns_failure(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """合法与非法登记项并存：合法项照常清理，整体结果如实报告未全部成功。"""
+        monkeypatch.setenv("OK_VAR", "placeholder-a")
+        monkeypatch.setattr(cli.sys, "platform", "linux")
+
+        cleaned = cli._cleanup_env_vars(Console(), ["OK_VAR", "bad; name"])
+
+        assert cleaned is False
+        assert "OK_VAR" not in os.environ
+        out = capsys.readouterr().out
+        assert "bad; name" in out
+        assert "已从当前进程清除 1 个变量" in out
+
     def test_windows_script_content(self) -> None:
         script = cli._windows_env_cleanup_script(["A_B", "C"])
 
