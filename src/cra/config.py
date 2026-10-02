@@ -1,8 +1,8 @@
-"""配置层：~/.cra/models.json 与环境变量的合并读取（唯一出入口，Design.md §3.4/§7.4）。
+"""配置层：~/.cra/models.json 与环境变量的合并读取（唯一出入口）。
 
-解析优先级（§7.4）：--model/--provider 参数 > 配置文件 default > 环境变量回退。
+解析优先级：--model/--provider 参数 > 配置文件 default > 环境变量回退。
 api_key 只允许存在于用户目录配置文件与进程内存——仓库内任何文件、日志、测试样例
-不得出现真实密钥（§6 密钥边界）；本模块是 key 的唯一读取点。
+不得出现真实密钥；本模块是 key 的唯一读取点。
 """
 
 import hashlib
@@ -22,15 +22,14 @@ class ConfigError(Exception):
     """配置存在但无法使用（损坏、引用失效、参数无法解析），调用方打印后按运行错误退出 2。"""
 
 
-# ---- 供应商预设（D17/§10 M8；离线内置，不联网拉取清单）----
+# ---- 供应商预设（离线内置，不联网拉取清单）----
 
 
 @dataclass(frozen=True)
 class ProviderPreset:
     """供应商预设：官方接入点 + 预填模型清单 + key 官方惯用变量名。
 
-    预填项均可在交互中修改；清单于 2026-10-02 按官方文档核对（PROGRESS.md M8
-    记录复核依据），模型名有时效性——预填可改、cra config test 兜底验证。
+    预填项均可在交互中修改；模型名有时效性，cra config test 可兜底验证。
     """
 
     name: str  # 写入 models.json 的供应商名（default 引用与 --provider 均用它）
@@ -80,13 +79,13 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
 
 
 def env_var_for_provider(name: str) -> str:
-    """自定义供应商 → 默认 key 环境变量名（D17）。
+    """自定义供应商 → 默认 key 环境变量名。
 
     规则：大写、空格与非字母数字转 `_`、`_API_KEY` 后缀；非 ASCII 字符剥离。
-    退化输入的处理（cra 自审复核发现）：① 剥离后为空（纯非 ASCII/纯符号名）
-    时以名称摘要生成唯一变量名——不同供应商不得共用同一兜底名，否则 key 串
-    用会把一家凭据发给另一家的接入点；② 首字符为数字时前置 `_`（POSIX shell
-    标识符不得以数字开头，否则 export 指令无法执行）。
+    退化输入的处理：① 剥离后为空（纯非 ASCII/纯符号名）时以名称摘要生成唯一
+    变量名——不同供应商不得共用同一兜底名，否则 key 串用会把一家凭据发给另一
+    家的接入点；② 首字符为数字时前置 `_`（POSIX shell 标识符不得以数字开头，
+    否则 export 指令无法执行）。
     """
     parts: list[str] = []
     for char in name.upper():
@@ -104,7 +103,7 @@ def env_var_for_provider(name: str) -> str:
 
 
 def provider_env_var(name: str) -> str:
-    """供应商 key 的回退环境变量名（§7.4）：预设供应商用官方惯用名，自定义按规则生成。"""
+    """供应商 key 的回退环境变量名：预设供应商用官方惯用名，自定义按规则生成。"""
     for preset in PROVIDER_PRESETS:
         if preset.name == name:
             return preset.env_var
@@ -112,7 +111,7 @@ def provider_env_var(name: str) -> str:
 
 
 def resolve_provider_api_key(name: str, entry_api_key: str | None) -> str | None:
-    """供应商 key 三级回退链（D17/§7.4）：条目 api_key → {PROVIDER}_API_KEY → SE_CodeAgent。
+    """供应商 key 三级回退链：条目 api_key → {PROVIDER}_API_KEY → SE_CodeAgent。
 
     key 是否有效（与供应商匹配）由 API 认证环节暴露，此处只做存在性回退。
     """
@@ -121,9 +120,56 @@ def resolve_provider_api_key(name: str, entry_api_key: str | None) -> str | None
     return os.environ.get(provider_env_var(name)) or os.environ.get("SE_CodeAgent")
 
 
+# ---- 环境变量登记（设置时登记、卸载时只清登记在案的变量）----
+
+
+def env_registry_path() -> Path:
+    """本程序写入的环境变量登记文件（~/.cra/env-vars.json）。
+
+    卸载时据此区分"程序自己设置的变量"与"用户已有的同名变量"——只清前者，
+    绝不触碰后者（用户在检查作业之前可能就有 DEEPSEEK_API_KEY 等变量）。
+    """
+    return config_path().parent / "env-vars.json"
+
+
+def registered_env_vars() -> list[str]:
+    """读取登记清单；文件缺失或损坏返回空表（卸载侧据此保守跳过清理）。"""
+    path = env_registry_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    names = data.get("env_vars") if isinstance(data, dict) else None
+    if not isinstance(names, list):
+        return []
+    return [name for name in names if isinstance(name, str) and name]
+
+
+def register_env_var(name: str) -> None:
+    """登记一个由本程序 setx 写入的环境变量名（去重、原子替换）。
+
+    写盘失败上抛 OSError，由调用方提示——登记缺失会导致卸载时无法自动清理
+    该变量，须让用户知晓后手工处理。读-改-写未加跨进程锁：单用户 CLI 的
+    并发登记（同时开两个 cra config）理论上可能丢一次登记，属可接受边界。
+    """
+    names = registered_env_vars()
+    if name in names:
+        return
+    names.append(name)
+    path = env_registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps({"env_vars": names}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    os.replace(tmp, path)
+
+
 @dataclass(frozen=True)
 class ResolvedModel:
-    """一次 LLM 连接的解析结果（§7.4）；provider 为 None 表示来自环境变量回退。
+    """一次 LLM 连接的解析结果；provider 为 None 表示来自环境变量回退。
 
     api_key 恒为非空字符串：resolve 的所有返回路径都保证 key 存在（缺失时抛
     ConfigError 或返回 None），调用方无须再做空值回退。
@@ -136,11 +182,11 @@ class ResolvedModel:
 
 
 def config_path() -> Path:
-    """models.json 固定在用户目录（§7.4；Windows 为 %USERPROFILE%\\.cra\\）。"""
+    """models.json 固定在用户目录（Windows 为 %USERPROFILE%\\.cra\\）。"""
     return Path.home() / ".cra" / "models.json"
 
 
-# ---- 环境变量回退路径（§6 配置表；models.json 不存在或未覆盖相应项时生效）----
+# ---- 环境变量回退路径（models.json 不存在或未覆盖相应项时生效）----
 
 
 def get_api_key() -> str | None:
@@ -179,7 +225,7 @@ def get_max_context_tokens() -> int:
     return _get_int_env("CRA_MAX_CONTEXT_TOKENS", DEFAULT_MAX_CONTEXT_TOKENS)
 
 
-# ---- models.json（§7.4）：加载、校验与保存 ----
+# ---- models.json：加载、校验与保存 ----
 
 
 def load_raw() -> dict[str, Any]:
@@ -202,7 +248,7 @@ def load_raw() -> dict[str, Any]:
 def save_raw(data: dict[str, Any]) -> None:
     """校验后原子写入 models.json（先写临时文件再替换，防写一半损坏）。
 
-    POSIX 上尽力收紧文件权限为 0600（该文件含明文 key，§9）；失败不阻塞写入，
+    POSIX 上尽力收紧文件权限为 0600（该文件含明文 key）；失败不阻塞写入，
     文件权限与备份注意事项由 cra config 在写入时向用户提示。
     """
     validate_config(data)
@@ -219,10 +265,10 @@ def save_raw(data: dict[str, Any]) -> None:
 
 
 def validate_config(data: Any) -> None:
-    """models.json 结构校验（§7.4 schema 与边界规则）；不合法抛 ConfigError。
+    """models.json 结构校验（schema 与边界规则）；不合法抛 ConfigError。
 
-    api_key 允许缺失或空串（回退环境变量 SE_CodeAgent）；其余字段类型不符、
-    供应商名含 "/"、default 不是 "供应商/模型" 形态均视为配置损坏。
+    api_key 允许缺失或空串（回退环境变量）；其余字段类型不符、供应商名含 "/"、
+    default 不是 "供应商/模型" 形态均视为配置损坏。
     """
     if not isinstance(data, dict):
         raise ConfigError("配置文件结构无效：顶层必须是 JSON 对象。")
@@ -237,7 +283,7 @@ def validate_config(data: Any) -> None:
         if not isinstance(name, str) or not name:
             raise ConfigError(f"配置文件结构无效：{where} 缺少非空 name。")
         if "/" in name:
-            raise ConfigError(f"配置文件结构无效：供应商名 '{name}' 不得含 '/'（§7.4）。")
+            raise ConfigError(f"配置文件结构无效：供应商名 '{name}' 不得含 '/'。")
         base_url = entry.get("base_url")
         if not isinstance(base_url, str) or not base_url:
             raise ConfigError(f"配置文件结构无效：供应商 '{name}' 缺少非空 base_url。")
@@ -257,7 +303,7 @@ def validate_config(data: Any) -> None:
     if default is not None:
         if not isinstance(default, str) or "/" not in default:
             raise ConfigError(
-                f"配置文件结构无效：default {default!r} 应为 '供应商/模型'（§7.4）。"
+                f"配置文件结构无效：default {default!r} 应为 '供应商/模型'。"
             )
         provider_name, _, model_name = default.partition("/")
         if not provider_name or not model_name:
@@ -285,7 +331,7 @@ def validate_config(data: Any) -> None:
 def _resolve_provider(
     providers: list[dict[str, Any]], provider: str, model: str | None
 ) -> ResolvedModel:
-    """解析到指定供应商：--model 须在其清单内匹配，缺省取 models[0]（§7.4）。"""
+    """解析到指定供应商：--model 须在其清单内匹配，缺省取 models[0]。"""
     entry = next((item for item in providers if item.get("name") == provider), None)
     if entry is None:
         raise ConfigError(
@@ -312,7 +358,7 @@ def _resolve_provider(
 def resolve(
     *, model: str | None = None, provider: str | None = None
 ) -> ResolvedModel | None:
-    """按 §7.4 优先级解析本次使用的模型连接。
+    """按配置优先级解析本次使用的模型连接。
 
     返回 None 表示无任何可用配置（调用方打印 cra config 引导后退出 2）；
     配置存在但损坏、default 引用失效或 --model/--provider 无法解析时抛 ConfigError。
@@ -326,7 +372,7 @@ def resolve(
         if len(owners) > 1:
             raise ConfigError(
                 f"模型 '{model}' 在多个供应商中存在（{', '.join(owners)}），"
-                "请同时用 --provider 指定供应商（§7.4）。"
+                "请同时用 --provider 指定供应商。"
             )
         if owners:
             return _resolve_provider(providers, owners[0], model)
@@ -337,7 +383,7 @@ def resolve(
     if default:
         provider_name, _, model_name = str(default).partition("/")
         return _resolve_provider(providers, provider_name, model_name)
-    # 环境变量回退（§6 配置表）；无供应商清单时 --model 直接覆盖 CRA_MODEL
+    # 环境变量回退；无供应商清单时 --model 直接覆盖 CRA_MODEL
     api_key = os.environ.get("SE_CodeAgent")
     if not api_key:
         return None
