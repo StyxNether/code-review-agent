@@ -1,13 +1,13 @@
-"""function calling 冒烟测试（全仓库唯一允许真实联网的脚本，AGENTS.md 工程规范）。
+"""function calling 冒烟测试（全仓库唯一允许真实联网的脚本；pytest 测试内一律 mock 网络）。
 
-M4 起走 LangChain 新栈（llm.create_model 的 ChatOpenAI，OpenAI 兼容），用最小哑
-工具 echo 验证模型通路，与业务工具 schema 无关（Design.md §3）：
+走 LangChain 栈（llm.create_model 的 ChatOpenAI，OpenAI 兼容），用最小哑
+工具 echo 验证模型通路，与业务工具 schema 无关：
 1. 非流式（llm.invoke_once 保留通路）：bind_tools 后请求，确认模型返回 tool_calls；
    把 echo 执行结果作为 ToolMessage 回传，确认模型能给出最终回答。
 2. 流式：验证流式响应的 tool_call_chunks 可组装、末块携带 usage
    （stream_usage=True）、回传工具结果后能流式给出最终回答。
 
-结论须记入 docs/PROGRESS.md。运行：uv run python scripts/smoke_tools.py
+运行：uv run python scripts/smoke_tools.py
 """
 
 import json

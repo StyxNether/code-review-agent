@@ -1,15 +1,15 @@
-"""代码执行工具：run_python（行为与限制见 Design.md §3.2）。
+"""代码执行工具：run_python。
 
 **本机直接运行，非沙箱**：子进程拥有当前用户全部权限，仅用于审查过程中
 验证可信代码片段；风险以"限时 + 进程树强杀 + 输出截断 + 环境净化 + 限制明示"控制。
 
 相对路径相对进程启动目录（cwd）解析；子进程工作目录继承本进程（即进程启动目录）。
-子进程输出捕获显式 encoding='utf-8', errors='replace'（§3.2 通用规则：
-Windows 默认 cp936，否则 UTF-8 源码的中文输出会解码崩溃），并设
+子进程输出捕获显式 encoding='utf-8', errors='replace'（Windows 默认 cp936，
+否则 UTF-8 源码的中文输出会解码崩溃），并设
 PYTHONIOENCODING=utf-8 保持子进程侧一致；环境经净化后才继承（剔除凭证变量，
 防被审查代码经环境读取 key 后经输出回传模型上下文）。
 
-超时等失败以异常上抛，由注册表 dispatch 统一兜底为结构化错误文本回传模型（§5）。
+超时等失败以异常上抛，由注册表 dispatch 统一兜底为结构化错误文本回传模型。
 """
 
 import os
@@ -22,7 +22,7 @@ from typing import Any
 
 from cra import config
 
-MAX_OUTPUT_CHARS = 2000  # §3.2：stdout/stderr 各自截断上限
+MAX_OUTPUT_CHARS = 2000  # stdout/stderr 各自截断上限
 MAX_TIMEOUT_SECONDS = 60  # 模型可请求的单次超时上限，防止长挂拖死会话
 KILL_REAP_SECONDS = 5  # 强杀后回收子进程的有限等待；再超时则放弃回收（杀树已尽力）
 
@@ -33,8 +33,8 @@ _PYTHON_SUFFIX = ".py"
 def _is_credential_var(name: str) -> bool:
     """环境变量名是否属凭证类（独立成函数便于测试与扩展名单）。
 
-    大小写不敏感比对：Windows 环境变量名不区分大小写（实测环境中存在
-    SE_CODEAGENT 全大写变体，精确匹配过滤会漏）；POSIX 侧为大小写敏感，
+    大小写不敏感比对：Windows 环境变量名不区分大小写（同名全大写变体确实
+    存在，精确匹配过滤会漏）；POSIX 侧为大小写敏感，
     不敏感过滤只会多剔除无关变量，属安全方向的超集。名称黑名单无法覆盖
     "名字无害、值是凭证"的变量——这是本控制的已知边界。
     """
@@ -42,7 +42,7 @@ def _is_credential_var(name: str) -> bool:
 
 
 def _sanitized_env() -> dict[str, str]:
-    """父环境剔除凭证变量后的副本（验收走查修复：key 不得进入子进程环境）。
+    """父环境剔除凭证变量后的副本（key 不得进入子进程环境）。
 
     被审查/被生成的代码可 print(os.environ) 读走环境变量，其输出会流式渲染并
     随会话留存于模型上下文——剔除 SE_CodeAgent 与一切 *API_KEY* 型变量名，
@@ -83,7 +83,7 @@ def run_python(
 
     effective_timeout = timeout if timeout is not None else config.get_exec_timeout()
     if not 0 < effective_timeout <= MAX_TIMEOUT_SECONDS:
-        # 配置来源（CRA_EXEC_TIMEOUT）与模型传参同标准校验（cra 自审发现）：
+        # 配置来源（CRA_EXEC_TIMEOUT）与模型传参同标准校验：
         # 非法配置不应伪装成"执行超时"，而应给出指向配置的可读错误
         source = "timeout 参数" if timeout is not None else "环境变量 CRA_EXEC_TIMEOUT"
         return (
@@ -95,10 +95,10 @@ def run_python(
 
 
 def _run_subprocess(command: list[str], timeout_seconds: int) -> tuple[int, str, str]:
-    """运行子进程并收集输出；任何退出路径都杀树并有限回收（§5）。
+    """运行子进程并收集输出；任何退出路径都杀树并有限回收。
 
     超时强杀整棵进程树后以异常上抛，由 dispatch 兜底；Ctrl+C 等中断同样先杀树、
-    再有限等待回收管道，然后上抛原始异常——不留残留进程与管道（验收走查修复）；
+    再有限等待回收管道，然后上抛原始异常——不留残留进程与管道；
     杀树失败时回收等待超时后放弃（有限等待，不阻塞中断响应）。
     """
     environment = {**_sanitized_env(), "PYTHONIOENCODING": "utf-8"}
@@ -144,7 +144,7 @@ def _kill_process_tree(process: subprocess.Popen[str]) -> str | None:
 
     Windows 下用 taskkill /T /F 连子进程一起杀（proc.kill() 只杀直接子进程，
     孙进程会残留）；POSIX 下子进程以独立进程组启动（start_new_session），对
-    整组 SIGKILL 同样覆盖孙进程（验收走查修复：原 proc.kill() 会残留孙进程；
+    整组 SIGKILL 同样覆盖孙进程（proc.kill() 会残留孙进程；
     子孙若自建进程组则仍不可及，与 taskkill /T 的边界一致）。
     """
     if sys.platform == "win32":
@@ -169,7 +169,7 @@ def _kill_process_tree(process: subprocess.Popen[str]) -> str | None:
 
 
 def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
-    """单路输出截断（§3.2 防刷屏）；截断处附提示让模型知道内容不完整。"""
+    """单路输出截断（防刷屏）；截断处附提示让模型知道内容不完整。"""
     if len(text) <= limit:
         return text
     return text[:limit] + _TRUNCATION_NOTICE.format(limit=limit)

@@ -1,7 +1,7 @@
 """工具注册表：名称 → (JSON schema, handler)。
 
-注册表屏蔽 handler 细节（§3.4 数据封装）：对 agent 只暴露 schema 列表与
-dispatch(name, arguments_json) -> str；工具异常一律结构化为错误文本回传模型（§5），
+注册表屏蔽 handler 细节（数据封装）：对 agent 只暴露 schema 列表与
+dispatch(name, arguments_json) -> str；工具异常一律结构化为错误文本回传模型，
 不向上抛出，REPL 不因工具失败崩溃。新增工具 = 调用一次 register。
 """
 
@@ -65,7 +65,7 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def dispatch(self, name: str, arguments_json: str) -> str:
-        """分发工具调用并返回字符串结果；任何失败都以"错误：…"结构化文本回传（§5）。
+        """分发工具调用并返回字符串结果；任何失败都以"错误：…"结构化文本回传。
 
         未注册工具名、非法 JSON、参数不符 schema（如缺必填参数）都不抛出，
         而是作为错误文本交给模型自行调整策略，不触发 API 重试。
@@ -88,12 +88,12 @@ class ToolRegistry:
             )
         try:
             return str(tool.handler(**arguments))
-        except Exception as exc:  # noqa: BLE001 — 设计要求：工具异常必须全部在此兜底回传模型（§5）
+        except Exception as exc:  # noqa: BLE001 — 设计要求：工具异常必须全部在此兜底回传模型
             return ERROR_PREFIX + "工具 '" + name + "' 执行失败：" + str(exc)
 
 
 def _build_default_registry() -> ToolRegistry:
-    """内置三工具（§3.2）：list_dir / read_file / run_python。"""
+    """内置三工具：list_dir / read_file / run_python。"""
     registry = ToolRegistry()
     registry.register(
         name="list_dir",

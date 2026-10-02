@@ -1,6 +1,6 @@
-"""文件系统工具：list_dir 与 read_file（行为与限制见 Design.md §3.2）。
+"""文件系统工具：list_dir 与 read_file。
 
-所有 handler 返回字符串（错误也是字符串，§3.4 数据封装）；
+所有 handler 返回字符串（错误也是字符串，数据封装）；
 相对路径一律相对进程启动目录（cwd）解析，不做"项目根"推断。
 """
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 MAX_READ_LINES = 400  # 单次读取上限，超出提示模型用 start/end 分段
 
-# §3.2：list_dir 忽略这些目录与所有点开头的隐藏目录
+# list_dir 忽略这些目录与所有点开头的隐藏目录
 IGNORED_DIRS = {".venv", "__pycache__", ".git", ".pytest_cache", ".ruff_cache"}
 
 
@@ -87,7 +87,7 @@ def read_file(path: str, start: int | None = None, end: int | None = None) -> st
     lines = text.splitlines()
     total = len(lines)
     if total == 0:
-        # 空文件没有行区间可言，按区间规则会误报"start 不能大于 end"（M2 样例回归发现）
+        # 空文件没有行区间可言，按区间规则会误报"start 不能大于 end"
         return f"{target}（空文件，共 0 行）"
 
     start_line, end_line = _normalize_range(start, end, total)

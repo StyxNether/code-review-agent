@@ -1,4 +1,4 @@
-"""run_python 行为与限制（Design.md §3.2/§5）：限时杀树、输出截断、参数校验、编码。
+"""run_python 行为与限制：限时杀树、输出截断、参数校验、编码。
 
 超时用例注入 timeout=1 或 CRA_EXEC_TIMEOUT=1（约 1s/例），不用默认 10s 拖慢套件；
 边界样例 fixtures 的黄金回归见 test_buggy_samples.py。
@@ -33,7 +33,7 @@ class TestBasicExecution:
         assert "（空）" in result
 
     def test_utf8_output_roundtrip(self) -> None:
-        # §3.2：子进程输出显式 utf-8 解码 + PYTHONIOENCODING，中文不乱码不崩溃
+        # 子进程输出显式 utf-8 解码 + PYTHONIOENCODING，中文不乱码不崩溃
         result = exec_py.run_python(code="print('中文输出')")
 
         assert "中文输出" in result
@@ -77,7 +77,7 @@ class TestArgValidation:
     def test_config_timeout_validated_same_as_param(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """回归（cra 自审）：配置来源的超时与模型传参同标准校验，非法值不伪装成执行超时。"""
+        """配置来源的超时与模型传参同标准校验，非法值不伪装成执行超时。"""
         for bad in ("0", "-5", "61"):
             monkeypatch.setenv("CRA_EXEC_TIMEOUT", bad)
 
@@ -124,7 +124,7 @@ class TestTimeout:
             exec_py.run_python(path=str(target))
 
     def test_timeout_structured_via_dispatch(self, tmp_path: Path) -> None:
-        # §5：exec 路径的异常同样经 dispatch 兜底为结构化错误回传模型
+        # exec 路径的异常同样经 dispatch 兜底为结构化错误回传模型
         target = tmp_path / "loop.py"
         target.write_text("while True: pass\n", encoding="utf-8")
 
@@ -137,7 +137,7 @@ class TestTimeout:
 
 
 class TestEnvSanitization:
-    """验收走查修复：子进程环境剔除凭证变量，key 不得经输出回传模型上下文。"""
+    """子进程环境剔除凭证变量，key 不得经输出回传模型上下文。"""
 
     def test_agent_key_not_in_child_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SE_CodeAgent", "sk-secret-for-test")
@@ -148,7 +148,7 @@ class TestEnvSanitization:
         assert "sk-secret-for-test" not in result
 
     def test_agent_key_case_variant_filtered(self) -> None:
-        """回归（cra 自审实测）：Windows 环境名不区分大小写，全大写变体同样须剔除。"""
+        """Windows 环境名不区分大小写，全大写变体同样须剔除。"""
         assert exec_py._is_credential_var("SE_CodeAgent")
         assert exec_py._is_credential_var("SE_CODEAGENT")
         assert exec_py._is_credential_var("OPENAI_API_KEY")
@@ -178,7 +178,7 @@ class TestEnvSanitization:
 
 
 class TestInterruptCleanup:
-    """验收走查修复：工具执行期间的中断必须回收子进程，不留残留进程与管道。"""
+    """工具执行期间的中断必须回收子进程，不留残留进程与管道。"""
 
     def test_keyboard_interrupt_kills_child_before_propagating(
         self, monkeypatch: pytest.MonkeyPatch

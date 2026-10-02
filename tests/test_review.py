@@ -1,4 +1,4 @@
-"""cra review 测试(§7.5):文件展开、prompt 构造、JSON schema 解析校验与
+"""cra review 测试:文件展开、prompt 构造、JSON schema 解析校验与
 退出码判定。Agent 一律 mock,无网络。"""
 
 import argparse
@@ -62,20 +62,33 @@ class TestCollectReviewFiles:
 
         assert files == [(str(target), "x = 1")]
 
-    def test_directory_expands_first_level_py_sorted(self, tmp_path: Path) -> None:
+    def test_directory_expands_first_level_text_files_sorted(self, tmp_path: Path) -> None:
         (tmp_path / "b.py").write_text("b", encoding="utf-8")
         (tmp_path / "a.py").write_text("a", encoding="utf-8")
         (tmp_path / "note.txt").write_text("t", encoding="utf-8")
+        (tmp_path / "data.bin").write_bytes(b"\x00\x01binary")
+        (tmp_path / ".env").write_text("SECRET=1", encoding="utf-8")
         subdir = tmp_path / "sub"
         subdir.mkdir()
         (subdir / "c.py").write_text("c", encoding="utf-8")  # 第二层不展开
 
         files = cli._collect_review_files([str(tmp_path)])
 
-        assert [name for name, _ in files] == [str(tmp_path / "a.py"), str(tmp_path / "b.py")]
+        assert [name for name, _ in files] == [
+            str(tmp_path / "a.py"),
+            str(tmp_path / "b.py"),
+            str(tmp_path / "note.txt"),
+        ]
+
+    def test_directory_skips_only_hidden_when_all_binary(self, tmp_path: Path) -> None:
+        (tmp_path / "blob.bin").write_bytes(b"\x00\xff")
+        (tmp_path / ".hidden").write_text("h", encoding="utf-8")
+
+        with pytest.raises(cli._ReviewFileError, match="没有可审查的文本文件"):
+            cli._collect_review_files([str(tmp_path)])
 
     def test_empty_directory_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(cli._ReviewFileError, match="没有 .py"):
+        with pytest.raises(cli._ReviewFileError, match="没有可审查的文本文件"):
             cli._collect_review_files([str(tmp_path)])
 
     def test_missing_path_raises(self, tmp_path: Path) -> None:
@@ -176,7 +189,7 @@ class TestParseJsonReport:
 
 
 class TestRunReviewExitCodes:
-    """退出码契约(§7.5):0 完成、1 存在【严重】(仅 --json)、2 运行错误。"""
+    """退出码契约:0 完成、1 存在【严重】(仅 --json)、2 运行错误。"""
 
     @pytest.fixture(autouse=True)
     def _env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -289,7 +302,7 @@ class TestRunReviewExitCodes:
     def test_unexpected_error_exits_2_not_1(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
     ) -> None:
-        """§7.5 顶层兜底:未预期异常按运行错误退出 2,禁止裸逃逸伪装成"发现严重问题"。"""
+        """顶层兜底:未预期异常按运行错误退出 2,禁止裸逃逸伪装成"发现严重问题"。"""
         _patch_agent(monkeypatch)
         target = tmp_path / "a.py"
         target.write_text("x = 1", encoding="utf-8")

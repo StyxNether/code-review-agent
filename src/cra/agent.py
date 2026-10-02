@@ -1,12 +1,12 @@
-"""Agent 循环：LangChain 1.x create_agent（底层 LangGraph）封装（Design.md §3.1）。
+"""Agent 循环：LangChain 1.x create_agent（底层 LangGraph）封装。
 
-agent 只管循环与状态（§3.4）：会话消息正本由本模块持有（D14——/undo、/save /load
-与中断回滚都作用于 self.messages），每轮以无状态方式把消息列表注入图、取回本轮
-新增消息回写正本。LangChain/LangGraph 类型（消息、流事件、图对象）不出本模块
-向上暴露，cli 只见到字符串回调与返回文本（Agent.run(input, callbacks) -> str，
-§2.2 作业二接缝）。
+agent 只管循环与状态：会话消息正本由本模块持有（/undo、/save /load 与中断回滚
+都作用于 self.messages），每轮以无状态方式把消息列表注入图、取回本轮新增消息回写
+正本。LangChain/LangGraph 类型（消息、流事件、图对象）不出本模块向上暴露，cli
+只见字符串回调与返回文本（Agent.run(input, callbacks) -> str 可编程接口，作业二
+工作流复用的接缝）。
 
-框架映射（D8/D13/D14）：
+框架映射：
 - 模型客户端为 llm.create_model() 的 ChatOpenAI（OpenAI 兼容）；SDK/框架异常经
   llm.translate_failure 翻译为 LLMError，本模块不 import SDK 类型；
 - 工具经 StructuredTool 桥接注册表：模型可见 schema 与注册表逐字段一致（保真），
@@ -41,21 +41,21 @@ from cra import config, llm
 from cra.prompts import SYSTEM_PROMPT
 from cra.tools import ERROR_PREFIX, EXEC_TOOL_NAME, Tool, ToolRegistry, get_default_registry
 
-MAX_TOOL_ROUNDS = 10  # §3.1：最大工具轮次，超过则强制要求模型给出结论
+MAX_TOOL_ROUNDS = 10  # 最大工具轮次，超过则强制要求模型给出结论
 _NODES_PER_TOOL_ROUND = 2  # 每个工具轮的图节点数（模型 + 工具）；middleware 引入新节点时须同步
 
 ToolEventCallback = Callable[[str, str], None]  # (工具名, 参数 JSON)
 ToolResultCallback = Callable[[str], None]  # 工具结果文本
 DeltaCallback = Callable[[str], None]  # 最终回答的文本增量
-ExecConfirmCallback = Callable[[dict[str, Any]], bool]  # run_python 执行确认（§7.2）
+ExecConfirmCallback = Callable[[dict[str, Any]], bool]  # run_python 执行确认
 
 # ToolNode 对参数校验失败等分支的兜底文案前缀（langgraph prebuilt）；仅用于改写时
 # 剥离——分支判别以 ToolMessage.status=="error" 语义字段为准（见
 # _normalize_framework_error），框架升版换文案不影响协议
 _FRAMEWORK_ERROR_PREFIX = "Error:"
 
-# finish_reason="length" 时附加到最终回答（M1 挂账：长度截断的回答此前被静默当
-# 最终结论，用户无法察觉不完整）；同段文本一并入库，保证"继续"追问时模型可见
+# finish_reason="length" 时附加到最终回答：长度截断的回答若静默当最终结论，
+# 用户无法察觉不完整；同段文本一并入库，保证"继续"追问时模型可见
 _LENGTH_TRUNCATION_NOTICE = "\n\n⚠ 回答因达到输出长度上限被截断，可能不完整；可让我继续作答。"
 
 
@@ -101,7 +101,7 @@ def truncate_rounds(
     usage_total_tokens: int | None,
     max_tokens: int,
 ) -> list[BaseMessage]:
-    """按完整轮次原子截断（§3.1）：真实 usage 超阈值时从最旧丢弃完整轮次。
+    """按完整轮次原子截断：真实 usage 超阈值时从最旧丢弃完整轮次。
 
     以 user 消息为轮次边界整体丢弃，保证 tool_calls 与配对的 tool 消息不被拆散
     （拆散会导致 API 400）；至少保留最近一个完整轮次——单轮自身超限时宁可超限
@@ -154,7 +154,7 @@ def _normalize_framework_error(message: BaseMessage) -> BaseMessage:
     """框架生成的错误 ToolMessage（status="error"）统一为"错误："前缀回传模型。
 
     以 status 语义字段判别而非文案前缀：工具的正常输出（status="success"）即使
-    恰好以 "Error:" 开头也不被改写（验收走查实证的误伤缺陷）；框架升版更换文案
+    恰好以 "Error:" 开头也不被改写；框架升版更换文案
     时该门禁依旧成立。"错误："前缀已存在的消息（历史轮次经 wrap_tool_call 改写
     过）原样返回，避免重复叠加。
     """
@@ -172,14 +172,14 @@ def _normalize_framework_error(message: BaseMessage) -> BaseMessage:
 
 
 class _ToolCallbacksMiddleware(AgentMiddleware):
-    """工具调用回调、执行确认与"错误："结构化错误协议（§3.1(3)/§5/§7.2）。
+    """工具调用回调、执行确认与"错误："结构化错误协议。
 
     框架错误分支统一归入"错误："前缀：未知工具名（tool is None，复用注册表
     文案，含可用工具清单）、框架参数校验失败/畸形参数（按 ToolMessage.status
     =="error" 判别后改写前缀）、执行异常（兜底捕获）。on_tool/on_tool_result
     渲染回调在三类分支统一触发，cli 的工具打点与失败展示依赖该协议。
 
-    confirm_exec 为 run_python 的执行前确认回调（§7.2 --ask-exec / /confirm）：
+    confirm_exec 为 run_python 的执行前确认回调（--ask-exec / /confirm）：
     返回 False 时以结构化文本拒绝执行并回传模型，REPL 开关由 cli 经属性切换。
     """
 
@@ -233,7 +233,7 @@ class _ToolCallbacksMiddleware(AgentMiddleware):
         else:
             try:
                 response = handler(request)
-            except Exception as exc:  # noqa: BLE001 — 设计要求：工具异常必须全部结构化回传模型（§5）
+            except Exception as exc:  # noqa: BLE001 — 设计要求：工具异常必须全部结构化回传模型
                 response = _error_tool_message(call, ERROR_PREFIX + f"工具 '{name}' 执行失败：{exc}")
             else:
                 if isinstance(response, ToolMessage):
@@ -249,12 +249,12 @@ class _ToolCallbacksMiddleware(AgentMiddleware):
 
 
 class _MaxToolRoundsMiddleware(AgentMiddleware):
-    """最大工具轮次（§3.1(4)）：达限后对下一次模型调用去工具并注入收尾指令。
+    """最大工具轮次：达限后对下一次模型调用去工具并注入收尾指令。
 
     官方 ModelCallLimit/ToolCallLimit 的 exit 语义不等价（不注入、不去工具），不采用。
     计数只覆盖本轮（见 _rounds_this_run），历史轮次不累积；收尾指令经 system
     通道注入（不产生伪造 user 消息）——请求视图的轮次边界只认真实 user 消息，
-    截断不会把孤立指令当作"最后一个完整轮次"而丢弃全部上下文；指令不落正本（D14）。
+    截断不会把孤立指令当作"最后一个完整轮次"而丢弃全部上下文；指令不落正本。
     """
 
     def __init__(self, max_rounds: int) -> None:
@@ -282,7 +282,7 @@ class _MaxToolRoundsMiddleware(AgentMiddleware):
 
 
 class _ContextTrimMiddleware(AgentMiddleware):
-    """上下文截断（§3.1(6)）：模型调用前按完整轮次裁剪请求视图，正本不动。"""
+    """上下文截断：模型调用前按完整轮次裁剪请求视图，正本不动。"""
 
     def __init__(self, max_context_tokens: int) -> None:
         self.max_context_tokens = max_context_tokens
@@ -301,8 +301,7 @@ def _bridge_tool(registry: ToolRegistry, tool_def: Tool) -> StructuredTool:
 
     args_schema 直接采用注册表的 JSON schema（模型可见 schema 逐字段保真，@tool
     的类型标注推断在此不适用）；dict schema 下参数不经框架 pydantic 校验直达
-    dispatch——参数缺失/类型不符等仍由注册表以"错误：…"结构化文本兜底，协议
-    路径与 M3 一致。
+    dispatch——参数缺失/类型不符等仍由注册表以"错误：…"结构化文本兜底。
     """
     name = tool_def.name
 
@@ -317,11 +316,11 @@ _SESSION_MESSAGE_TYPES = ("human", "ai", "tool", "system")
 
 
 def _validate_session_messages(messages: list[BaseMessage]) -> None:
-    """会话恢复的结构自检：消息类型合法且 tool 消息不悬挂（§7.3 /load 兜底）。
+    """会话恢复的结构自检：消息类型合法且 tool 消息不悬挂（/load 兜底）。
 
     手工编辑或旧版存档可能让正本进入 API 拒绝的非法序列（孤儿 tool 消息），
     在恢复时拒绝并给出可读错误，而非等下一次请求 400。对话段不接受 system
-    消息——dump_session 不导出系统提示词，出现即属篡改注入（cra 复审发现）。
+    消息——dump_session 不导出系统提示词，出现即属篡改注入。
     """
     pending: set[str] = set()
     for message in messages:
@@ -339,8 +338,8 @@ def _validate_session_messages(messages: list[BaseMessage]) -> None:
                 raise ValueError("会话数据中 tool 消息缺少配对的 tool_call（序列不合法）。")
             pending.discard(call_id)
     if pending:
-        # 反向配对：assistant 的 tool_calls 缺少 tool 响应（cra 复查发现），
-        # 放行会在下一次请求被 API 400 拒绝，取代本应在此处给出的可读错误
+        # 反向配对：assistant 的 tool_calls 缺少 tool 响应——放行会在下一次
+        # 请求被 API 400 拒绝，取代本应在此处给出的可读错误
         raise ValueError("会话数据中存在没有收到结果的 tool_call（序列不合法）。")
 
 
@@ -357,8 +356,8 @@ class Agent:
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
         confirm_exec: ExecConfirmCallback | None = None,
     ) -> None:
-        """model 注入仅用于测试（假模型）；真实路径经 resolved（config 层解析结果，
-        §7.4）构建 ChatOpenAI，两者皆缺时走环境变量回退。"""
+        """model 注入仅用于测试（假模型）；真实路径经 resolved（config 层解析结果）
+        构建 ChatOpenAI，两者皆缺时走环境变量回退。"""
         if model is not None:
             self._chat_model = model
             self.model = getattr(model, "model_name", "") or config.get_model()
@@ -405,7 +404,7 @@ class Agent:
         )
 
     def switch_model(self, resolved: config.ResolvedModel) -> None:
-        """切换模型并重建 agent 图；会话消息正本原样保留（§7.3 /change model）。
+        """切换模型并重建 agent 图；会话消息正本原样保留（/change model）。
 
         新客户端与新图全部构建成功后才赋值（整体成功或整体失败）：构建失败
         （如 key 缺失）时旧模型与图保持可用。
@@ -420,12 +419,12 @@ class Agent:
         self._graph = new_graph
 
     def reset(self) -> None:
-        """/clear：重置为仅含系统提示词的初始状态，角色与格式契约保留（§6）。"""
+        """/clear：重置为仅含系统提示词的初始状态，角色与格式契约保留。"""
         self.messages = [SystemMessage(content=SYSTEM_PROMPT)]
         self._tool_callbacks.callbacks = None  # 防御性清理：异常路径可能挂留回调引用
 
     def undo_turn(self) -> bool:
-        """作废最后一轮对话：删除最后一条 user 消息及其后的全部消息（§7.3 /undo）。
+        """作废最后一轮对话：删除最后一条 user 消息及其后的全部消息（/undo）。
 
         无对话轮次（仅系统提示词）时返回 False，正本不动。
         """
@@ -436,7 +435,7 @@ class Agent:
         return False
 
     def context_status(self) -> dict[str, Any]:
-        """当前上下文占用与截断阈值（§7.3 /context 的数据源）。
+        """当前上下文占用与截断阈值（/context 的数据源）。
 
         used 取最近一次响应的真实 usage（含系统提示词，服务端口径）；缺失时
         以字符估算降级并标注 estimated，供 cli 区分显示。
@@ -448,7 +447,7 @@ class Agent:
         return {"used": used, "limit": self.max_context_tokens, "estimated": estimated}
 
     def dump_session(self) -> list[dict[str, Any]]:
-        """会话消息 → 可 JSON 化的数组（§7.3 /save）；框架序列化留在 agent 层。
+        """会话消息 → 可 JSON 化的数组（/save）；框架序列化留在 agent 层。
 
         正本开头的系统提示词不入档：/load 恢复时拼当前版本 SYSTEM_PROMPT，
         避免把旧提示词固化进存档后随会话漂移。
@@ -457,7 +456,7 @@ class Agent:
         return messages_to_dict(dialogue)
 
     def load_session(self, data: list[dict[str, Any]]) -> None:
-        """从 dump_session 的数据整体恢复会话（§7.3 /load），系统提示词取当前版本。
+        """从 dump_session 的数据整体恢复会话（/load），系统提示词取当前版本。
 
         恢复后先做结构自检（_validate_session_messages），失败抛可读 ValueError
         且正本不变；赋值在校验之后，正本不会进入半恢复状态。
@@ -478,7 +477,7 @@ class Agent:
 
         on_tool / on_tool_result / on_delta 为渲染回调（cli 注入，agent 不依赖
         rich）；框架流事件在本层适配为纯字符串增量。任何异常（Ctrl+C 或请求
-        失败，含空回答）都会把正本回滚到本轮开始前的状态、本轮作废（§5），然后
+        失败，含空回答）都会把正本回滚到本轮开始前的状态、本轮作废，然后
         原样上抛。
         """
         self._tool_callbacks.callbacks = (on_tool, on_tool_result)
@@ -498,14 +497,14 @@ class Agent:
                     on_delta(_LENGTH_TRUNCATION_NOTICE)
             new_messages = list(final_state["messages"][fed_length:])
             if truncated and new_messages:
-                # 截断提示同文入库（M3 行为等价）："继续"追问时模型可见截断状态。
+                # 截断提示同文入库："继续"追问时模型可见截断状态。
                 # 只改写本轮新增消息的末条——正本末条在新增为空时是本轮 user 消息，
-                # 直接按 -1 定位会把它覆盖成回答（验收走查发现的越界覆盖缺陷）
+                # 直接按 -1 定位会把它覆盖成回答
                 new_messages[-1] = final_message.model_copy(update={"content": text})
             self.messages.extend(new_messages)
             return text
         except BaseException:
-            # §5：任何异常（中断/请求失败）都回滚本轮再上抛。图状态是一次性请求
+            # 任何异常（中断/请求失败）都回滚本轮再上抛。图状态是一次性请求
             # 视图，正本在本轮只有"追加 user 消息"与"成功后追加新消息"两处变更；
             # 按前缀长度截断，覆盖成功收尾之后仍抛异常的窄窗口（契约不依赖窗口概率）
             del self.messages[prefix_length:]
@@ -516,10 +515,10 @@ class Agent:
     def _invoke(
         self, fed: list[BaseMessage], on_delta: DeltaCallback | None
     ) -> tuple[dict[str, Any], AIMessage]:
-        """无状态图调用（D14）：注入消息列表，流式取回增量与最终状态。
+        """无状态图调用：注入消息列表，流式取回增量与最终状态。
 
         stream_mode="messages" 提供 token 增量（工具轮伴随的少量文本同样渲染，
-        §3.1 已知取舍）；"values" 提供每步后的状态快照，末次即最终状态——本轮
+        已知取舍）；"values" 提供每步后的状态快照，末次即最终状态——本轮
         新增消息 = 最终状态超出 fed 的尾部，据此回写正本。
         """
         final_state: dict[str, Any] | None = None
@@ -552,5 +551,5 @@ class Agent:
 
 
 def _finish_reason(message: AIMessage) -> str | None:
-    """服务端 finish_reason（§3.1：length 截断需向用户明示）。"""
+    """服务端 finish_reason（length 截断需向用户明示）。"""
     return message.response_metadata.get("finish_reason")

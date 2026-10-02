@@ -1,4 +1,4 @@
-"""工具注册表：schema 暴露、分发与结构化错误（Design.md §3.2/§5）。"""
+"""工具注册表：schema 暴露、分发与结构化错误。"""
 
 import json
 from pathlib import Path
@@ -16,7 +16,7 @@ def test_default_registry_has_builtin_tools() -> None:
 
 
 def test_run_python_declares_non_sandbox() -> None:
-    """§3.2/§4：非沙箱限制必须在工具 description 中明示（模型与用户可见）。"""
+    """非沙箱限制必须在工具 description 中明示（模型与用户可见）。"""
     schema = next(
         item
         for item in get_default_registry().schemas()

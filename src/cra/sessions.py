@@ -1,7 +1,7 @@
-"""会话持久化的文件系统侧：/save /load 落在 ~/.cra/sessions/（§7.3）。
+"""会话持久化的文件系统侧：/save /load 落在 ~/.cra/sessions/。
 
 文件内容是消息数组（JSON）。消息 ↔ dict 的序列化在 agent 层完成（框架类型不出
-agent 层，§3.4），本模块只负责名称合法性、路径与 JSON 读写。
+agent 层），本模块只负责名称合法性、路径与 JSON 读写。
 """
 
 import json
@@ -12,7 +12,7 @@ from typing import Any
 
 # 名称仅限安全字符：会话名直接拼进文件路径，禁止分隔符使任何合法名称（含
 # ".."）都只能是单个路径成分、无法穿越；首字符允许下划线——自动保留存档
-# 固定名 _last（§7.3 M7）落在同一命名空间
+# 固定名 _last 落在同一命名空间
 _NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 # Windows 保留设备名（大小写不敏感）：作为文件名主干会导致写入失败或行为异常
 _WINDOWS_RESERVED = frozenset(

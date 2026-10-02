@@ -1,4 +1,4 @@
-"""边界样例黄金回归（M2 DoD）：fixtures/buggy_samples 每个样例经工具处理
+"""边界样例黄金回归：fixtures/buggy_samples 每个样例经工具处理
 均不崩且有可操作反馈——死循环超时被杀、note.txt 得到非 Python 提示、
 binary.bin 由 read_file 兜底、empty.py 正常退出/空文件提示。
 

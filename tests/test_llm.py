@@ -96,7 +96,7 @@ class TestCreateModel:
         assert llm.create_model().max_retries == llm.MAX_RETRIES
 
     def test_stream_usage_enabled_explicitly(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """§3.1：usage 是截断触发与 /context 的数据源，须显式开启。"""
+        """usage 是截断触发与 /context 的数据源，须显式开启。"""
         monkeypatch.setenv("SE_CodeAgent", "sk-test-key")
 
         assert llm.create_model().stream_usage is True
@@ -156,14 +156,14 @@ class TestTranslateFailure:
         assert "recursion_limit" in str(translated)
 
     def test_unexpected_exception_not_disguised(self) -> None:
-        """非 SDK/框架异常原样返回——意外缺陷不应伪装成请求失败（§3.4）。"""
+        """非 SDK/框架异常原样返回——意外缺陷不应伪装成请求失败。"""
         original = RuntimeError("代码缺陷")
 
         assert llm.translate_failure(original) is original
 
 
 class TestAuthGuidance:
-    """M3 挂账：key 指引跨平台化——按当前平台给出对应设置命令。"""
+    """key 指引按当前平台给出对应设置命令。"""
 
     def test_windows_hint_mentions_setx(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(llm.sys, "platform", "win32")
@@ -197,7 +197,7 @@ class TestInvokeOnce:
 
 
 class TestCreateModelExplicitParams:
-    """M5:cra config test 按供应商显式传 key/接入点;不回退环境变量。"""
+    """cra config test 按供应商显式传 key/接入点;不回退环境变量。"""
 
     def test_explicit_params_take_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("SE_CodeAgent", raising=False)
@@ -235,7 +235,7 @@ class _ProbeFakeChatOpenAI:
 
 
 class TestProbe:
-    """cra config test 的连通性自检(§7.4):状态分类与本层 SDK 异常边界。"""
+    """cra config test 的连通性自检:状态分类与本层 SDK 异常边界。"""
 
     @pytest.fixture(autouse=True)
     def _fake_openai(self, monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -252,7 +252,7 @@ class TestProbe:
         assert self._run() == ("ok", "")
 
     def test_empty_key_reported_without_request(self) -> None:
-        """自审修复:空 key 不发到服务端换误导性 401,直接归入 error 并提示。"""
+        """空 key 不发到服务端换误导性 401,直接归入 error 并提示。"""
         _ProbeFakeChatOpenAI.last_instance = None
 
         status, detail = llm.probe(base_url="https://x", api_key="", model_name="m")
@@ -285,7 +285,7 @@ class TestProbe:
         assert status == "timeout"
 
     def test_connection_error_reported_as_timeout(self) -> None:
-        """网络不可达与超时同属"timeout(网络不可达)"类(§7.4 的三分支报告)。"""
+        """网络不可达与超时同属"timeout(网络不可达)"类（三分支报告）。"""
         _ProbeFakeChatOpenAI.script = _connection_error()
         status, _ = self._run()
         assert status == "timeout"

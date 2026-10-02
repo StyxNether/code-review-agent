@@ -307,7 +307,7 @@ class TestRunBasics:
         assert results and results[0].startswith("错误")
 
     def test_tool_output_starting_with_error_not_rewritten(self) -> None:
-        """回归（验收走查）：工具的正常输出恰以 'Error:' 开头时不被误改写。
+        """工具的正常输出恰以 'Error:' 开头时不被误改写。
 
         判别依据是 ToolMessage.status 语义字段（正常输出 success），不是文案前缀。
         """
@@ -330,7 +330,7 @@ class TestRunBasics:
         assert results == ["Error: 这只是工具的正常输出"]  # cli 亦按正常结果展示
 
     def test_empty_tool_result_still_fires_callback(self) -> None:
-        """回归（验收走查）：三分支回调协议一致——空结果也触发 on_tool_result。"""
+        """三分支回调协议一致——空结果也触发 on_tool_result。"""
         registry = make_registry()
         registry.register(
             name="empty",
@@ -375,7 +375,7 @@ class TestRunBasics:
 
 class TestFinalAnswerHandling:
     def test_length_truncated_answer_gets_visible_notice(self) -> None:
-        """M1 挂账：finish_reason=length 的回答不能被静默当完整结论。
+        """finish_reason=length 的回答不能被静默当完整结论。
 
         提示须同时到达三处：渲染增量（cli 只认 on_delta）、返回值、正本
         （保证"继续"追问时模型可见截断状态）。
@@ -416,7 +416,7 @@ class TestFinalAnswerHandling:
         assert fake.requests[-1] == [SystemMessage(content=SYSTEM_PROMPT), *agent.messages[1:-1]]
 
     def test_no_new_messages_does_not_overwrite_user_input(self) -> None:
-        """回归（验收走查）：新增消息为空时不得把本轮 user 消息覆盖成回答。"""
+        """新增消息为空时不得把本轮 user 消息覆盖成回答。"""
         agent, _ = make_agent([text_response("答", finish_reason="length")])
         truncated_answer = text_response("答", finish_reason="length")
 
@@ -448,7 +448,7 @@ class TestMaxToolRounds:
         assert_rounds_atomic(agent.messages)
 
     def test_forced_call_has_no_tools_and_injected_directive(self) -> None:
-        """达限机制锁定：下一次模型调用去工具 + 收尾指令经 system 通道注入（§3.1(4)）。"""
+        """达限机制锁定：下一次模型调用去工具 + 收尾指令经 system 通道注入。"""
         script = [tool_response(f"c{i}", "echo", {"text": str(i)}) for i in range(MAX_TOOL_ROUNDS)]
         script.append(text_response("最终结论"))
         agent, fake = make_agent(script)
@@ -523,7 +523,7 @@ class TestMalformedToolCallArgs:
         assert len(malformed) == 1
         assert malformed[0].content.startswith("错误：")
         # 正本仍以有效调用收尾；合成 ToolMessage 的 id 只在 invalid_tool_calls 中
-        # （框架行为：不入 API 序列化，对严格校验的服务端存在孤儿风险——已记录 Design §8.3）
+        # （框架行为：不入 API 序列化，对严格校验的服务端存在孤儿风险）
         assert agent.messages[-1].content == "结论"
         valid_tool = [m for m in agent.messages if isinstance(m, ToolMessage) and m.tool_call_id == "c1"]
         assert len(valid_tool) == 1
@@ -828,7 +828,7 @@ def _exec_registry(calls: list[str]) -> ToolRegistry:
 
 
 class TestSwitchModel:
-    """§7.3 /change model 的底层能力:重建图、上下文正本保留。"""
+    """/change model 的底层能力:重建图、上下文正本保留。"""
 
     def _patch_create_model(
         self, monkeypatch: pytest.MonkeyPatch, new_fake: ScriptedChatModel
@@ -887,7 +887,7 @@ class TestSwitchModel:
 
 
 class TestExecConfirm:
-    """§7.2 --ask-exec / /confirm 的底层钩子:拒绝时结构化回传模型、不执行。"""
+    """--ask-exec / /confirm 的底层钩子:拒绝时结构化回传模型、不执行。"""
 
     def test_rejected_exec_not_run_and_reported(self) -> None:
         calls: list[str] = []
@@ -928,7 +928,7 @@ class TestExecConfirm:
         assert calls == ["x"]
 
     def test_confirm_none_runs_directly(self) -> None:
-        """默认自动执行(§7.2:--ask-exec 缺省)。"""
+        """默认自动执行(--ask-exec 缺省)。"""
         calls: list[str] = []
         agent = Agent(
             model=ScriptedChatModel(
@@ -946,7 +946,7 @@ class TestExecConfirm:
 
 
 class TestUndoAndContext:
-    """§7.3 /undo 与 /context 的底层能力。"""
+    """/undo 与 /context 的底层能力。"""
 
     def test_undo_removes_last_round(self) -> None:
         agent, _ = make_agent([text_response("答一"), text_response("答二")])
@@ -975,7 +975,7 @@ class TestUndoAndContext:
         assert status == {"used": 1234, "limit": 5000, "estimated": False}
 
     def test_context_estimates_without_usage(self) -> None:
-        """usage 缺失(服务端未回)时字符估算降级并标注(§3.1 安全降级)。"""
+        """usage 缺失(服务端未回)时字符估算降级并标注(安全降级)。"""
         agent, _ = make_agent([text_response("答", total_tokens=None)], max_context_tokens=5000)
         agent.run("问")
 
@@ -987,7 +987,7 @@ class TestUndoAndContext:
 
 
 class TestSessionPersistence:
-    """§7.3 /save /load 的底层能力:框架序列化留在 agent 层、系统提示词不入档。"""
+    """/save /load 的底层能力:框架序列化留在 agent 层、系统提示词不入档。"""
 
     def test_dump_skips_system_prompt(self) -> None:
         agent, _ = make_agent([text_response("答")])
@@ -1031,7 +1031,7 @@ class TestSessionPersistence:
         assert fake.requests[-1][-1].content == "第二问"
 
     def test_load_rejects_orphan_tool_message_and_keeps_original(self) -> None:
-        """自审修复:孤儿 tool 消息(无配对 tool_call)在恢复时被拒,正本不变。"""
+        """孤儿 tool 消息(无配对 tool_call)在恢复时被拒,正本不变。"""
         agent, _ = make_agent([text_response("答一")])
         agent.run("第一问")
         original = list(agent.messages)

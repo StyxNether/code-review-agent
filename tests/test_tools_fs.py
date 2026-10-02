@@ -1,4 +1,4 @@
-"""fs 工具行为与限制（Design.md §3.2）：tmp_path 造临时文件，无网络。"""
+"""fs 工具行为与限制：tmp_path 造临时文件，无网络。"""
 
 from pathlib import Path
 
@@ -184,7 +184,7 @@ class TestReadFile:
         assert "二进制" in result
 
     def test_empty_file_reports_empty_not_range_error(self, tmp_path: Path) -> None:
-        """回归（M2）：空文件按区间规则会误报 start>end，应提示空文件。"""
+        """空文件按区间规则会误报 start>end，应提示空文件。"""
         target = tmp_path / "empty.py"
         target.touch()
 
