@@ -2,7 +2,7 @@
 
 > ✅ 交付版（《软件工程与项目实践》第 1 次作业）。架构、接口规格与设计决策详见 [docs/Design.md](docs/Design.md)。
 
-基于 LLM 的命令行代码审查工具。给它一段/一个/一组代码文件（任意文本型源码与配置文件，Python 为主），它以代码审查员身份输出分级问题清单，并能在多轮对话中自主调用工具（读文件、运行代码）核实问题。支持多供应商模型配置、非交互批量审查与结构化输出。
+基于 LLM 的命令行代码审查工具。给它一段/一个/一组代码文件（任意文本型源码、脚本与配置文件，不限编程语言），它以代码审查员身份输出分级问题清单，并能在多轮对话中自主调用工具（读文件、运行代码）核实问题。支持多供应商模型配置、非交互批量审查与结构化输出。
 
 ## 功能
 
@@ -65,7 +65,7 @@ uv run cra config test   # 连通性自检：对每个供应商发一次 max_tok
 
 **供应商预设**：添加供应商时提供编号选择——1 自定义 + 8 家预设（DeepSeek、Kimi (Moonshot)、OpenAI、阿里云百炼、Z.ai Coding Plan / Z.ai API、BigModel Coding Plan / BigModel API）。选预设自动填入官方 base_url 与模型清单，**预填项均可修改**（base_url 回车用官方接入点或输入自定义；模型清单可答 n 自行输入）。
 
-**key 存储选择**：填入 key 后可选——1) 明文写入 models.json（注意文件权限与备份）；2) 环境变量（预设供应商用官方惯用名如 `DEEPSEEK_API_KEY`，自定义按"供应商名大写、空格与非字母数字转 `_`、`_API_KEY` 后缀"生成）。Windows 经 `setx` 自动写入并即时生效（key 不回显）；macOS/Linux 打印 `export` 指令由用户执行。选环境变量时 models.json 不落明文，已有明文一并移除。
+**key 存储选择**：填入 key 后可选——1) 明文写入 models.json（注意文件权限与备份）；2) 环境变量（预设供应商用官方惯用名如 `DEEPSEEK_API_KEY`，自定义按"供应商名大写、空格与非字母数字转 `_`、`_API_KEY` 后缀"生成）。**若该变量已存在且不是本程序设置的**（例如您此前已配置过），会先询问是否覆盖（默认不覆盖，拒绝则 key 改存明文、原值不动）；本程序写入的变量会登记到 `~/.cra/env-vars.json`，供卸载时精确清理。Windows 经 `setx` 自动写入并即时生效（key 不回显）；macOS/Linux 打印 `export` 指令由用户执行。选环境变量时 models.json 不落明文，已有明文一并移除。
 
 配置文件格式（`default` 以第一个 `/` 分隔"供应商/模型"）：
 
@@ -143,7 +143,7 @@ code-review-agent 已就绪（模型：deepseek/deepseek-flash）。提出审查
 
 ```bash
 uv run cra review a.py                          # 审查单文件
-uv run cra review a.py b.py src/                # 多路径=批量（目录展开第一层 .py）
+uv run cra review a.py b.py src/                # 多路径=批量（目录展开第一层文本文件）
 cat a.py | uv run cra review -                  # 从 stdin 读入
 uv run cra review a.py -o report.md             # 结论写入 Markdown 报告
 uv run cra review a.py --json                   # 结构化 JSON 输出（stdout）
@@ -174,12 +174,15 @@ uv run cra review a.py --json                   # 结构化 JSON 输出（stdout
 cra uninstall
 ```
 
-两道交互确认（第一道默认 **N** 防误触发）后分级清理：
+定位：**只删除项目文件夹之外、且由本程序产生的东西**——克隆的项目文件夹本身请自行删除（如 `rm -rf code-review-agent`），两者合起来即是完整退场。
 
-1. **清单确认**：列出将删除内容（uv 工具 `code-review-agent` 与 cra 垫片、PATH 条目），回车或 `n` 取消、不删除任何内容；
-2. **用户数据**：询问是否同时删除 `~/.cra/`（models.json 含 API key、sessions/ 会话存档），默认 **Y**（诉求即"删干净"），答 `n` 保留；
-3. **后台清理**：生成等待本进程退出后执行 `uv tool uninstall` 的分离后台任务（运行中的解释器文件被锁，须父进程退出后才能删净），完成后若已无其他 uv 工具，再从用户 PATH 移除 `~/.local/bin` 条目（Windows 自动；macOS/Linux 打印待删的 shell 配置行指令、不自动改 rc）；
-4. 打印"程序将在退出后完成卸载"后正常退出。
+三道交互确认（第一道默认 **N** 防误触发，后两道默认 **Y** 满足"删干净"，Ctrl+C 一律保留）后分级清理：
+
+1. **清单确认**：列出将删除内容（uv 工具 `code-review-agent` 与 cra 垫片、PATH 条目、用户数据、本程序设置的环境变量清单），回车或 `n` 取消、不删除任何内容；
+2. **用户数据**：删除 `~/.cra/`（models.json 含 API key、sessions/ 会话存档、环境变量登记文件），答 `n` 保留；
+3. **环境变量**：仅清理 `~/.cra/env-vars.json` 中**登记在案**的变量（本程序 `setx` 写入过的），逐个列出明示——您已有的其它变量（含作业检查前就存在的 `DEEPSEEK_API_KEY`）绝不触碰；Windows 经 PowerShell 从用户环境移除（新开终端立即可见），macOS/Linux 打印待删的 export 行（不自动改 rc）；登记文件损坏时保守跳过；
+4. **后台清理**：生成等待本进程退出后执行 `uv tool uninstall` 的分离后台任务（运行中的解释器文件被锁，须父进程退出后才能删净），完成后若已无其他 uv 工具，再从用户 PATH 移除 `~/.local/bin` 条目（Windows 自动；macOS/Linux 打印待删的 shell 配置行指令、不自动改 rc）；
+5. 打印"程序将在退出后完成卸载"后正常退出。
 
 边界：`uv tool list` 中无本工具（如以 `uv run` 方式使用）时跳过工具卸载并说明；PATH 条目被其他 uv 工具共享时保留。中途任何一步拒绝都无副作用。
 
