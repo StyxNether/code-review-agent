@@ -5,6 +5,7 @@ api_key 只允许存在于用户目录配置文件与进程内存——仓库内
 不得出现真实密钥（§6 密钥边界）；本模块是 key 的唯一读取点。
 """
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -19,6 +20,105 @@ DEFAULT_MAX_CONTEXT_TOKENS = 100_000
 
 class ConfigError(Exception):
     """配置存在但无法使用（损坏、引用失效、参数无法解析），调用方打印后按运行错误退出 2。"""
+
+
+# ---- 供应商预设（D17/§10 M8；离线内置，不联网拉取清单）----
+
+
+@dataclass(frozen=True)
+class ProviderPreset:
+    """供应商预设：官方接入点 + 预填模型清单 + key 官方惯用变量名。
+
+    预填项均可在交互中修改；清单于 2026-10-02 按官方文档核对（PROGRESS.md M8
+    记录复核依据），模型名有时效性——预填可改、cra config test 兜底验证。
+    """
+
+    name: str  # 写入 models.json 的供应商名（default 引用与 --provider 均用它）
+    base_url: str
+    models: tuple[str, ...]
+    env_var: str
+
+
+PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
+    ProviderPreset(
+        "DeepSeek", "https://api.deepseek.com", ("deepseek-flash", "deepseek-v4-pro"), "DEEPSEEK_API_KEY"
+    ),
+    ProviderPreset(
+        "Kimi (Moonshot)", "https://api.moonshot.cn/v1", ("kimi-k3", "kimi-k2.6"), "MOONSHOT_API_KEY"
+    ),
+    ProviderPreset(
+        "OpenAI", "https://api.openai.com/v1", ("gpt-6-astra", "gpt-6-luna"), "OPENAI_API_KEY"
+    ),
+    ProviderPreset(
+        "阿里云百炼",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ("qwen3.8-max", "qwen3.8-flash"),
+        "DASHSCOPE_API_KEY",
+    ),
+    ProviderPreset(
+        "Z.ai Coding Plan",
+        "https://api.z.ai/api/coding/paas/v4",
+        ("glm-5.3", "glm-5.3-flash"),
+        "ZAI_API_KEY",
+    ),
+    ProviderPreset(
+        "Z.ai API", "https://api.z.ai/api/paas/v4", ("glm-5.3", "glm-5.3-flash"), "ZAI_API_KEY"
+    ),
+    ProviderPreset(
+        "BigModel Coding Plan",
+        "https://open.bigmodel.cn/api/coding/paas/v4",
+        ("glm-5.3", "glm-5.3-flash"),
+        "ZHIPUAI_API_KEY",
+    ),
+    ProviderPreset(
+        "BigModel API",
+        "https://open.bigmodel.cn/api/paas/v4",
+        ("glm-5.3", "glm-5.3-flash"),
+        "ZHIPUAI_API_KEY",
+    ),
+)
+
+
+def env_var_for_provider(name: str) -> str:
+    """自定义供应商 → 默认 key 环境变量名（D17）。
+
+    规则：大写、空格与非字母数字转 `_`、`_API_KEY` 后缀；非 ASCII 字符剥离。
+    退化输入的处理（cra 自审复核发现）：① 剥离后为空（纯非 ASCII/纯符号名）
+    时以名称摘要生成唯一变量名——不同供应商不得共用同一兜底名，否则 key 串
+    用会把一家凭据发给另一家的接入点；② 首字符为数字时前置 `_`（POSIX shell
+    标识符不得以数字开头，否则 export 指令无法执行）。
+    """
+    parts: list[str] = []
+    for char in name.upper():
+        if char.isascii() and char.isalnum():
+            parts.append(char)
+        elif parts and parts[-1] != "_":
+            parts.append("_")
+    stem = "".join(parts).strip("_")
+    if not stem:
+        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8].upper()
+        return f"CRA_API_KEY_{digest}"
+    if stem[0].isdigit():
+        stem = f"_{stem}"
+    return f"{stem}_API_KEY"
+
+
+def provider_env_var(name: str) -> str:
+    """供应商 key 的回退环境变量名（§7.4）：预设供应商用官方惯用名，自定义按规则生成。"""
+    for preset in PROVIDER_PRESETS:
+        if preset.name == name:
+            return preset.env_var
+    return env_var_for_provider(name)
+
+
+def resolve_provider_api_key(name: str, entry_api_key: str | None) -> str | None:
+    """供应商 key 三级回退链（D17/§7.4）：条目 api_key → {PROVIDER}_API_KEY → SE_CodeAgent。
+
+    key 是否有效（与供应商匹配）由 API 认证环节暴露，此处只做存在性回退。
+    """
+    if entry_api_key:
+        return entry_api_key
+    return os.environ.get(provider_env_var(name)) or os.environ.get("SE_CodeAgent")
 
 
 @dataclass(frozen=True)
@@ -198,11 +298,11 @@ def _resolve_provider(
             "可用 cra config 添加，或从清单中选择。"
         )
     model_name = model if model is not None else models[0]
-    api_key = entry.get("api_key") or os.environ.get("SE_CodeAgent")
+    api_key = resolve_provider_api_key(provider, entry.get("api_key"))
     if not api_key:
         raise ConfigError(
-            f"供应商 '{provider}' 未配置 api_key，且环境变量 SE_CodeAgent 也未设置；"
-            "请运行 cra config 补充 key，或设置环境变量。"
+            f"供应商 '{provider}' 未配置 api_key，环境变量 {provider_env_var(provider)} 与 "
+            "SE_CodeAgent 也未设置；请运行 cra config 补充 key，或设置环境变量。"
         )
     return ResolvedModel(
         model=model_name, base_url=entry["base_url"], api_key=api_key, provider=provider
