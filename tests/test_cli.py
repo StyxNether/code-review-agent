@@ -2,7 +2,9 @@
 （不产生真实终端输出，无网络）。"""
 
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -118,7 +120,8 @@ class _FakeAgent:
     undo_default = True  # 类属性:undo 测试经 monkeypatch 覆盖(每次构造实例会重建)
 
     def __init__(self, **_kwargs: Any) -> None:
-        self.model = "test-model"
+        self.model = "m-one"
+        self.provider = "prov"  # 当前供应商（M8 /change model 的"当前使用中"标记数据源）
         self.reset_calls = 0
         self.turns: list[str] = []
         self.switched: list[Any] = []
@@ -757,12 +760,52 @@ class TestReplCommands:
         assert "会话已保存" in out
         assert "会话已加载" in out
 
-    def test_load_without_name_shows_usage(
+    def test_load_without_name_lists_sessions_and_loads_selection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        """M8：/load 省略名称列出会话数字选择；加载成功自动打印全部会话历史。"""
+        seeded = [
+            {"type": "human", "data": {"content": "早前的问题"}},
+            {"type": "ai", "data": {"content": "早前的回答"}},
+        ]
+        sessions_dir = home_dir / ".cra" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        (sessions_dir / "alpha.json").write_text("[]", encoding="utf-8")
+        (sessions_dir / "beta.json").write_text(json.dumps(seeded), encoding="utf-8")
+
+        out = self._repl(monkeypatch, capsys, ["/load", "2", "exit"])
+
+        assert "1. alpha" in out and "2. beta" in out
+        assert "会话已加载" in out
+        assert "你> 早前的问题" in out  # 加载后打印历史（你>/cra> 前缀逐条）
+        assert "cra> 早前的回答" in out
+        assert _FakeAgent.last is not None
+        assert _FakeAgent.last.loaded == [seeded]
+
+    def test_load_without_name_cancel_returns_to_repl(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """M8：列表选择处回车取消，会话不变。"""
+        sessions_dir = home_dir / ".cra" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        (sessions_dir / "alpha.json").write_text("[]", encoding="utf-8")
+
+        out = self._repl(monkeypatch, capsys, ["/load", "", "exit"])
+
+        assert "已取消" in out
+        assert _FakeAgent.last is not None
+        assert _FakeAgent.last.loaded == []
+
+    def test_load_without_any_sessions_hinted(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        """M8 语义变化：省略名称不再打印用法，而是提示没有已保存会话。"""
         out = self._repl(monkeypatch, capsys, ["/load", "exit"])
 
-        assert "用法" in out
+        assert "没有已保存的会话" in out
 
     def test_save_invalid_name_rejected(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -857,6 +900,23 @@ class TestReplCommands:
         assert "已切换到 prov/m-two" in out
         assert _FakeAgent.last is not None
         assert len(_FakeAgent.last.switched) == 1
+
+    def test_change_model_marks_current_provider_and_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Any,
+    ) -> None:
+        """M8：清单标注"当前使用中"（_FakeAgent 当前为 prov/m-one）。"""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        _write_models_json(tmp_path, _provider_models_json())
+
+        out = self._repl(monkeypatch, capsys, ["/model", "1", "", "exit"])
+
+        assert "（当前使用中）" in out
+        assert "1. m-one（当前使用中）" in out
+        assert out.count("（当前使用中）") == 2  # 供应商清单 1 处 + 模型清单 1 处
 
     def test_change_alias_model_word_required(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -985,7 +1045,7 @@ class TestExitAndSetting:
     def test_setting_menu_dispatches_to_existing_implementations(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """菜单 1–5 逐项分发到既有命令函数（mock 记录映射），操作后回到菜单，0 返回对话。"""
+        """菜单 1–6 逐项分发到既有命令函数（mock 记录映射），操作后回到菜单，0 返回对话。"""
         calls: list[Any] = []
         monkeypatch.setenv("SE_CodeAgent", "sk-test")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
@@ -996,17 +1056,20 @@ class TestExitAndSetting:
         monkeypatch.setattr(cli, "_cmd_save", lambda state, name: calls.append(("save", name)))
         monkeypatch.setattr(cli, "_cmd_load", lambda state, name: calls.append(("load", name)))
         monkeypatch.setattr(cli, "_cmd_confirm", lambda state, arg: calls.append(("confirm", arg)))
+        monkeypatch.setattr(cli, "_cmd_delete", lambda state: calls.append("delete"))
         monkeypatch.setattr(
             "builtins.input",
-            _feed(["/setting", "1", "2", "3", "s1", "4", "s2", "5", "on", "0", "exit"]),
+            _feed(["/setting", "1", "2", "3", "s1", "4", "s2", "5", "on", "6", "0", "exit"]),
         )
 
         cli._run_chat()
         out = capsys.readouterr().out
 
-        assert calls == ["model", "config", ("save", "s1"), ("load", "s2"), ("confirm", "on")]
-        # 初始菜单 + 每个操作后各回一次菜单（5 项操作 → 共 6 次显示）
-        assert out.count("设置菜单") == 6
+        assert calls == [
+            "model", "config", ("save", "s1"), ("load", "s2"), ("confirm", "on"), "delete"
+        ]
+        # 初始菜单 + 每个操作后各回一次菜单（6 项操作 → 共 7 次显示）
+        assert out.count("设置菜单") == 7
 
     def test_setting_empty_choice_returns_to_repl(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1061,6 +1124,36 @@ class TestExitAndSetting:
 
         assert (home_dir / ".cra" / "sessions" / "menu-save.json").exists()
         assert "会话已保存" in out
+
+    def test_setting_save_empty_name_uses_timestamp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        """M8：菜单 3) 回车自动以时间戳命名保存（%Y%m%d-%H%M%S）。"""
+        out = self._repl(monkeypatch, capsys, ["/setting", "3", "", "0", "exit"])
+
+        names = [p.stem for p in (home_dir / ".cra" / "sessions").glob("*.json")]
+        assert any(re.fullmatch(r"\d{8}-\d{6}", name) for name in names)
+        assert "会话已保存" in out
+
+    def test_setting_load_empty_name_lists_sessions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        """M8：菜单 4) 回车列出会话数字选择（_cmd_load 空名分支），取消回菜单。"""
+        sessions_dir = home_dir / ".cra" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        (sessions_dir / "alpha.json").write_text("[]", encoding="utf-8")
+
+        out = self._repl(monkeypatch, capsys, ["/setting", "4", "", "", "0", "exit"])
+
+        assert "1. alpha" in out
+        assert "已取消" in out
+        assert out.count("设置菜单") == 2  # 取消后回到菜单，0 退出菜单
 
     def test_setting_load_missing_file_returns_to_menu(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1253,3 +1346,128 @@ class TestSessionAutosave:
     def test_session_path_accepts_leading_underscore(self, home_dir: Path) -> None:
         """_last 存档名（下划线开头）在 sessions 层合法（M7 放宽首字符类）。"""
         assert sessions.session_path("_last").name == "_last.json"
+
+
+# ---- M8:首次配置引导、/delete 会话删除(§5/§7.3)----
+
+
+class TestFirstRunSetup:
+    """M8 首次配置引导（§5）：确认 → 引导式配置 → 进入 REPL；拒绝 → 指引 + 退出 2。"""
+
+    def test_decline_prints_guide_and_exits_2(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """明确拒绝：维持既有指引 + 退出码 2（拒绝后仍无配置）。"""
+        monkeypatch.delenv("SE_CodeAgent", raising=False)
+        monkeypatch.setattr("builtins.input", _feed(["n"]))
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._run_chat()
+
+        assert excinfo.value.code == 2
+        out = capsys.readouterr().out
+        assert "已跳过配置" in out  # 询问被拒绝（mock input 下提示语不进 stdout）
+        assert "cra config" in out  # 既有指引维持
+
+    def test_confirm_wizard_configures_and_enters_repl(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        home_dir: Path,
+    ) -> None:
+        """DoD 演示路径：Y → DeepSeek 预设 → 回车 base_url → 回车预填 → key →
+        环境变量存储 → 自动设默认 → 进入 REPL。"""
+        monkeypatch.delenv("SE_CodeAgent", raising=False)
+        run_calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> Any:
+            run_calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        monkeypatch.setattr(cli.sys, "platform", "win32")  # 断言 setx 分支，与平台解耦
+        monkeypatch.setattr(cli.os, "environ", dict(os.environ))
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        key_iter = iter(["placeholder-wizard-key"])
+        monkeypatch.setattr(cli.getpass, "getpass", lambda _p: next(key_iter))
+        # 确认(回车=Y) → 预设 2(DeepSeek) → base_url 回车 → 预填回车 → 存储 2(环境变量)
+        # → 设默认：供应商 1 → 模型 1 → REPL exit
+        monkeypatch.setattr(
+            "builtins.input", _feed(["", "2", "", "", "2", "1", "1", "exit"])
+        )
+
+        cli._run_chat()
+
+        out = capsys.readouterr().out
+        assert "已就绪" in out  # 配置完成后进入 REPL
+        data = config.load_raw()
+        assert data["default"] == "DeepSeek/deepseek-flash"  # 引导式配置已设默认
+        entry = data["providers"][0]
+        assert entry["name"] == "DeepSeek"
+        assert "api_key" not in entry  # 环境变量存储：models.json 不落明文
+        assert run_calls[0][:2] == ["setx", "DEEPSEEK_API_KEY"]
+        assert os.environ.get("DEEPSEEK_API_KEY") == "placeholder-wizard-key"
+
+
+class TestDeleteSession:
+    """/delete（§7.3 M8）：列表数字选择 + y/N 确认；_last 同样可删。"""
+
+    def _repl(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        inputs: list[str],
+    ) -> str:
+        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        monkeypatch.setattr("builtins.input", _feed(inputs))
+        cli._run_chat()
+        return capsys.readouterr().out
+
+    def _seed(self, home_dir: Path, *names: str) -> None:
+        directory = home_dir / ".cra" / "sessions"
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (directory / f"{name}.json").write_text("[]", encoding="utf-8")
+
+    def test_delete_confirm_removes_file(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        self._seed(home_dir, "alpha", "beta")
+
+        out = self._repl(monkeypatch, capsys, ["/delete", "1", "y", "exit"])
+
+        assert "会话已删除" in out
+        assert not (home_dir / ".cra" / "sessions" / "alpha.json").exists()
+        assert (home_dir / ".cra" / "sessions" / "beta.json").exists()
+
+    def test_delete_decline_keeps_file(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        self._seed(home_dir, "alpha")
+
+        out = self._repl(monkeypatch, capsys, ["/delete", "1", "n", "exit"])
+
+        assert "已取消" in out
+        assert (home_dir / ".cra" / "sessions" / "alpha.json").exists()
+
+    def test_delete_last_archive_allowed(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """_last（自动保留存档）同样可删；退出时自动保留以当前会话重建同名存档。"""
+        self._seed(home_dir, "_last")
+
+        out = self._repl(monkeypatch, capsys, ["/delete", "1", "y", "exit"])
+
+        assert "会话已删除" in out
+        recreated = json.loads(
+            (home_dir / ".cra" / "sessions" / "_last.json").read_text(encoding="utf-8")
+        )
+        assert recreated == [{"type": "human", "data": {"content": "审查 x.py"}}]  # 全新自动保留
+
+    def test_delete_without_sessions_hinted(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = self._repl(monkeypatch, capsys, ["/delete", "exit"])
+
+        assert "没有可删除的会话" in out

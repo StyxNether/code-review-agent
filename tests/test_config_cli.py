@@ -6,6 +6,8 @@
 """
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -35,21 +37,36 @@ def _entry_with_key(name: str, models: list[str]) -> dict:
 
 
 def _run_config(monkeypatch: pytest.MonkeyPatch, inputs: list[str], keys: list[str] | None = None) -> None:
-    """驱动 cra config 交互模式;inputs 供菜单与表单,key 序列供 getpass。"""
+    """驱动 cra config 交互模式;inputs 供菜单与表单,key 序列供 getpass。
+
+    输入清单耗尽后抛 EOFError(模拟管道结束,与 test_cli._feed 同型):存储选择等
+    新增询问处的中断语义用例依赖该行为。
+    """
     iterator = iter(inputs)
-    monkeypatch.setattr("builtins.input", lambda *a: next(iterator))
+
+    def fake_input(*_args: str) -> str:
+        try:
+            return next(iterator)
+        except StopIteration:
+            raise EOFError
+
+    monkeypatch.setattr("builtins.input", fake_input)
     key_iterator = iter(keys or [])
     monkeypatch.setattr(cli.getpass, "getpass", lambda _p: next(key_iterator))
     cli._run_config_interactive()
 
 
 class TestConfigAddProvider:
+    # M8 起添加供应商先选类型（1 自定义 + 8 预设），key 后有存储选择（回车=明文）
     def test_add_provider_writes_file(
         self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
     ) -> None:
         _run_config(
             monkeypatch,
-            ["1", "deepseek", "https://api.deepseek.com", "deepseek-flash, deepseek-chat", "0"],
+            [
+                "1", "1", "deepseek", "https://api.deepseek.com",
+                "deepseek-flash, deepseek-chat", "1", "0",
+            ],
             keys=[_PLACEHOLDER_KEY],
         )
 
@@ -60,7 +77,9 @@ class TestConfigAddProvider:
 
     def test_base_url_default_applied(self, monkeypatch: pytest.MonkeyPatch, home_dir: Path) -> None:
         _run_config(
-            monkeypatch, ["1", "deepseek", "", "deepseek-flash", "0"], keys=[_PLACEHOLDER_KEY]
+            monkeypatch,
+            ["1", "1", "deepseek", "", "deepseek-flash", "1", "0"],
+            keys=[_PLACEHOLDER_KEY],
         )
 
         assert config.load_raw()["providers"][0]["base_url"] == config.DEFAULT_BASE_URL
@@ -68,8 +87,10 @@ class TestConfigAddProvider:
     def test_key_placeholder_means_env_fallback(
         self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
     ) -> None:
-        """key 留空 → 回退环境变量(条目 api_key 为空串,resolve 时回退)。"""
-        _run_config(monkeypatch, ["1", "deepseek", "", "deepseek-flash", "0"], keys=[""])
+        """key 留空 → 回退环境变量(条目 api_key 为空串,resolve 时回退)；不询问存储。"""
+        _run_config(
+            monkeypatch, ["1", "1", "deepseek", "", "deepseek-flash", "0"], keys=[""]
+        )
 
         assert config.load_raw()["providers"][0]["api_key"] == ""
 
@@ -80,7 +101,7 @@ class TestConfigAddProvider:
 
         _run_config(
             monkeypatch,
-            ["1", "deepseek", "y", "https://new.example.com", "0"],
+            ["1", "1", "deepseek", "y", "https://new.example.com", "1", "0"],
             keys=[_PLACEHOLDER_UPDATED],
         )
 
@@ -96,14 +117,14 @@ class TestConfigAddProvider:
         original = {"providers": [_entry_with_key("deepseek", ["old-model"])]}
         _write_models(home_dir, original)
 
-        _run_config(monkeypatch, ["1", "deepseek", "n", "0"])
+        _run_config(monkeypatch, ["1", "1", "deepseek", "n", "0"])
 
         assert config.load_raw() == original
 
     def test_provider_name_with_slash_rejected(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
     ) -> None:
-        _run_config(monkeypatch, ["1", "a/b", "0"])
+        _run_config(monkeypatch, ["1", "1", "a/b", "0"])
 
         assert "'/'" in capsys.readouterr().out
         assert not _models_path(home_dir).exists()
@@ -113,7 +134,9 @@ class TestConfigAddProvider:
     ) -> None:
         """§7.4:首次写盘时提示文件权限与备份注意事项。"""
         _run_config(
-            monkeypatch, ["1", "deepseek", "", "deepseek-flash", "0"], keys=[_PLACEHOLDER_KEY]
+            monkeypatch,
+            ["1", "1", "deepseek", "", "deepseek-flash", "1", "0"],
+            keys=[_PLACEHOLDER_KEY],
         )
 
         out = capsys.readouterr().out
@@ -145,7 +168,8 @@ class TestConfigProviders:
     def test_update_key(self, monkeypatch: pytest.MonkeyPatch, home_dir: Path) -> None:
         _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
 
-        _run_config(monkeypatch, ["5", "1", "0"], keys=[_PLACEHOLDER_UPDATED])
+        # M8：key 输入后新增存储选择（回车 = 明文，现状行为）
+        _run_config(monkeypatch, ["5", "1", "1", "0"], keys=[_PLACEHOLDER_UPDATED])
 
         assert config.load_raw()["providers"][0]["api_key"] == _PLACEHOLDER_UPDATED
 
@@ -292,3 +316,171 @@ class TestConfigTest:
                 "model_name": "first-model",
             }
         ]
+
+
+class TestConfigPresets:
+    """M8 供应商预设（D17）：编号选择自动填官方接入点与模型清单，预填项均可修改。"""
+
+    def test_preset_prefill_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """选 DeepSeek 预设：回车用官方 base_url、回车采用预填模型清单。"""
+        _run_config(
+            monkeypatch,
+            ["1", "2", "", "", "1", "0"],
+            keys=[_PLACEHOLDER_KEY],
+        )
+
+        entry = config.load_raw()["providers"][0]
+        assert entry["name"] == "DeepSeek"
+        assert entry["base_url"] == "https://api.deepseek.com"
+        assert entry["models"] == ["deepseek-flash", "deepseek-v4-pro"]
+
+    def test_preset_prefills_are_editable(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """预设预填项均可修改：自定义 base_url；模型清单答 n 后自行输入。"""
+        _run_config(
+            monkeypatch,
+            ["1", "2", "https://mirror.example.com", "n", "my-model-a, my-model-b", "1", "0"],
+            keys=[_PLACEHOLDER_KEY],
+        )
+
+        entry = config.load_raw()["providers"][0]
+        assert entry["base_url"] == "https://mirror.example.com"
+        assert entry["models"] == ["my-model-a", "my-model-b"]
+
+    def test_preset_menu_lists_custom_and_all_presets(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """类型清单 = 1 自定义 + 8 家预设；回车取消。"""
+        _run_config(monkeypatch, ["1", "", "0"])
+
+        out = capsys.readouterr().out
+        assert "自定义" in out
+        for preset in config.PROVIDER_PRESETS:
+            assert preset.name in out
+        assert "已取消" in out
+
+
+class TestKeyStorageChoice:
+    """M8 key 存储选择（D17）：明文（现状）或环境变量（models.json 不落明文）。"""
+
+    def test_plaintext_choice_keeps_current_behavior(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
+
+        _run_config(monkeypatch, ["5", "1", "1", "0"], keys=[_PLACEHOLDER_UPDATED])
+
+        assert config.load_raw()["providers"][0]["api_key"] == _PLACEHOLDER_UPDATED
+
+    def test_env_storage_removes_plaintext_and_activates_process_env(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """选环境变量：已有明文移除、setx 以 (变量名, key) 调用、当前进程立即生效。"""
+        _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
+        run_calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            run_calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        monkeypatch.setattr(cli.sys, "platform", "win32")  # 断言 setx 分支，与平台解耦
+        # os.environ 换为副本：进程内生效的断言可测、且不污染真实环境
+        monkeypatch.setattr(cli.os, "environ", dict(os.environ))
+
+        _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
+
+        entry = config.load_raw()["providers"][0]
+        assert "api_key" not in entry
+        assert run_calls and run_calls[0][:2] == ["setx", "DEEPSEEK_API_KEY"]
+        assert os.environ.get("DEEPSEEK_API_KEY") == _PLACEHOLDER_UPDATED
+        assert "已写入用户环境变量" in capsys.readouterr().out
+
+    def test_setx_failure_falls_back_to_plaintext(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """setx 失败回退明文（有明确提示），key 不因存储失败而丢失。"""
+        _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
+
+        def failing_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+
+        monkeypatch.setattr(cli.subprocess, "run", failing_run)
+        monkeypatch.setattr(cli.os, "environ", dict(os.environ))
+
+        _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
+
+        entry = config.load_raw()["providers"][0]
+        assert entry["api_key"] == _PLACEHOLDER_UPDATED
+        assert os.environ.get("DEEPSEEK_API_KEY") is None  # 失败路径不写进程环境
+        assert "setx 写入失败" in capsys.readouterr().out
+
+    def test_posix_prints_export_instruction(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
+    ) -> None:
+        """POSIX：打印 export 指令由用户执行（不自动改 rc）；当前进程即时生效。"""
+        _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
+        monkeypatch.setattr(cli.sys, "platform", "linux")
+        monkeypatch.setattr(cli.os, "environ", dict(os.environ))
+
+        _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
+
+        out = capsys.readouterr().out
+        assert "export DEEPSEEK_API_KEY=" in out
+        assert "勿粘贴到公共场合" in out  # 明文回显的保密提醒
+        assert os.environ.get("DEEPSEEK_API_KEY") == _PLACEHOLDER_UPDATED  # 本会话无断层
+        assert "api_key" not in config.load_raw()["providers"][0]
+
+    def test_storage_choice_interrupt_keeps_existing_key(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """存储选择处中断（EOF/Ctrl+C）不是确认：保留旧 key，不落任何新存储。"""
+        original = {"providers": [_entry_with_key("deepseek", ["m1"])]}
+        _write_models(home_dir, original)
+
+        _run_config(monkeypatch, ["5", "1"], keys=[_PLACEHOLDER_UPDATED])  # 存储询问处 EOF
+
+        assert config.load_raw() == original  # 旧 key 原样保留
+
+    def test_custom_provider_generates_env_var_name(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """自定义供应商的存储变量名按规则生成（空格转 _、大写、_API_KEY 后缀）。"""
+        entry: dict[str, Any] = {"name": "My Provider", "base_url": "https://x", "models": ["m"]}
+        _write_models(home_dir, {"providers": [entry]})
+        monkeypatch.setattr(cli.sys, "platform", "linux")
+
+        _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
+
+        assert "api_key" not in config.load_raw()["providers"][0]
+        assert config.provider_env_var("My Provider") == "MY_PROVIDER_API_KEY"
+
+
+class TestConfigTestChain:
+    """cra config test 与 resolve 同一条 key 回退链（D17）。"""
+
+    def test_probe_uses_provider_env_var(
+        self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
+    ) -> None:
+        """条目无 key 时探测回退 {PROVIDER}_API_KEY（不再只看 SE_CodeAgent）。"""
+        entry: dict[str, Any] = {
+            "name": "myprov", "base_url": "https://x.example.com", "models": ["m"]
+        }
+        _write_models(home_dir, {"providers": [entry]})
+        monkeypatch.setenv("MYPROV_API_KEY", "placeholder-provider-env")
+        calls: list[dict[str, str]] = []
+
+        def fake_probe(base_url: str, api_key: str, model_name: str) -> tuple[str, str]:
+            calls.append({"base_url": base_url, "api_key": api_key, "model_name": model_name})
+            return "ok", ""
+
+        monkeypatch.setattr(cli.llm, "probe", fake_probe)
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._run_config_test()
+
+        assert excinfo.value.code == 0
+        assert calls[0]["api_key"] == "placeholder-provider-env"
