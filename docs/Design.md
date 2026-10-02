@@ -3,7 +3,7 @@
 《软件工程与项目实践》第 1 次作业 · 提交截止 2026-10-07 24:00（作业二将复用本项目成果，见 §2.2 与 §10）
 平台环境：Windows + Git Bash（PowerShell/CMD 兼容）。
 
-> 本文描述**目标形态**；截至 M7，已排期内容（M0–M7，§10）全部落地，代码、README 与本文一致；§2.2 的作业二接缝与 **M8**（2026-10-02 用户验收反馈排期，§5/§7.3/§7.4 中标注 M8 的条目）属目标形态、待实施。M7（CLI 易用性：裸入口 / 设置菜单 / 会话自动保留）已于 2026-10-01 落地。
+> 本文描述**目标形态**；截至 M8，已排期内容（M0–M8，§10）全部落地，代码、README 与本文一致；§2.2 的作业二接缝属目标形态、留待作业二。M7（CLI 易用性：裸入口 / 设置菜单 / 会话自动保留）已于 2026-10-01 落地；M8（会话与配置便利性：首次引导 / 供应商预设 / key 环境变量存储 / 会话管理 / 卸载程序）已于 2026-10-02 落地。
 
 ## 1. 项目概述
 
@@ -276,21 +276,22 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
 | M5 配置与 CLI 面 | 1–2 个编码会话；净增 ~800–1200 LOC（含测试） | 1 个编码会话；净增 **+2826 LOC**（3587 → 6413：src 1387→2672、tests 2070→3611、scripts 不变）；测试 173→297 项 |
 | M6 流式过程体验 | 1 个编码会话；净增 ~300–500 LOC（渲染管线重写 + 测试） | 1 个编码会话；净增 **+864 LOC**（6413 → 7277：src 2672→3131、tests 3611→4016、scripts 不变）；测试 313→329 项；cra 自审 1 严重 + 1 一般 + 2 建议 → 修复 + 复核轮 6 建议落地 |
 | M7 CLI 易用性 | 1 个编码会话；净增 ~150–250 LOC（含测试） | 1 个编码会话；净增 **+493 LOC**（7277 → 7770：src 3131→3264、tests 4016→4376、scripts 不变；超估算主因新用例 25 项 / +360 测试行）；测试 329→354 项；cra 自审三轮（初审 2 一般 + 6 建议 → 复核 2 一般 + 4 建议 → 终审 0 严重、2 一般 + 3 建议，处置见 §8.3） |
+| M8 会话与配置便利性 | 1 个编码会话；净增 ~550–850 LOC（含测试） | 1 个编码会话；净增 **+1463 LOC**（7770 → 9233：src 3264→3874、tests 4376→5229、scripts 不变；超估算主因卸载程序完整实现（确认/分级清理/分离任务/PATH 判定 ~300 行）与预设/存储/会话管理交互分支的用例面——+56 用例 / +853 测试行）；测试 354→410 项；cra 自审三轮（初审 2 严重 + 3 一般 + 4 建议 → 复核 1 严重 + 5 一般 + 5 建议 → 终审 4 项小修 + 不采纳 3 项，处置见 §8.3） |
 
-### 8.2 代码评审 Checklist（收尾门禁；M0–M7 每次收尾逐项执行，当前记录：M7）
+### 8.2 代码评审 Checklist（收尾门禁；M0–M8 每次收尾逐项执行，当前记录：M8）
 
-- [x] 全仓库 grep 无明文密钥；key 读取点唯一（config 层） ✅（M7 复执行：grep 无命中；自动保留只写对话消息序列、不涉 key）
-- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅（M7 新增兜底均有 noqa 与注释陈述理由：_autosave_session 的 `except Exception`（退出路径失败仅提示）、失败提示自身的嵌套兜底（BLE001/S110，finally 中不得上抛）、_hint_last_session 的 `except Exception`（启动提示视同无存档）；菜单降级走 ConfigError 类型契约，不吞 SystemExit）
-- [x] `run_python` 有超时强杀与输出截断 ✅（M7 未改动工具层与 middleware）
-- [x] Agent 循环有最大工具轮次（10）限制 ✅（M7 未改动）
-- [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅（M7 未改动）
-- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M7 未改动声明，有测试锁定；裸入口 `cra --help` description 同步说明默认行为）
-- [x] README 每条命令逐条实测可复制执行 ✅（M7 实测：裸 `cra` 进 REPL、/help 新命令、/setting 菜单嵌套循环（→配置交互→回菜单→回对话）、exit 退出、`cra nope` 仍 invalid choice 退出 2；命令表/全局参数/功能清单已同步）
-- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M7 后 354 项；新增：裸入口默认分支与语义反转、裸入口与 chat 参数缺省一致性锁定、菜单分发（mock 既有命令函数验证映射与返回菜单）、菜单嵌套循环与损坏配置降级、/exit、退出自动保留（exit//exit/EOF 三路径）、空会话跳过不覆盖旧存档、写盘失败不阻断退出、启动提示（非空/缺失/空/损坏/结构非法）、/resume 恢复与损坏存档正本不变、_last 名称合法性）
-- [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅（M7：_cmd_setting/_repl_loop/_autosave_session/_hint_last_session 均带 docstring；conftest home_dir 改 autouse 附隔离理由）
-- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅（M7 无新增依赖方向；_config_interactive_session 抽取仅在 cli 层内部）
+- [x] 全仓库 grep 无明文密钥；key 读取点唯一（config 层） ✅（M8 复执行：grep 无命中；key 三级回退链集中在 config.resolve_provider_api_key，cli 的存储选择仅决定"写文件还是写环境"，读取仍唯一）
+- [x] 无裸 `except:`；所有工具异常均回传模型而非静默吞掉 ✅（M8 新增兜底均有 noqa 与理由：_ask 扩大捕获 OSError（stdin 被捕获/关闭的环境视同取消，首次引导路径不再崩）、_write_env_var_key 的 setx 失败回退明文（有明确提示，key 不丢）；_cmd_load/_cmd_delete 沿用既有"可读提示 + return"模式）
+- [x] `run_python` 有超时强杀与输出截断 ✅（M8 未改动工具层与 middleware）
+- [x] Agent 循环有最大工具轮次（10）限制 ✅（M8 未改动）
+- [x] 消息截断按完整轮次原子丢弃，配对不拆散，系统提示词保留 ✅（M8 未改动）
+- [x] `cra chat --help` 与 README 含"非沙箱、限时执行"限制声明 ✅（M8 未改动声明，有测试锁定；新增 uninstall 子命令 description 明示"确认前不删除任何内容"）
+- [x] README 每条命令逐条实测可复制执行 ✅（M8 实测：首次引导全流程（Y→DeepSeek 预设→回车→key→环境变量→默认→REPL→对话）、cra config test、/load 列表与历史打印、/delete、/setting 3/4/6、cra uninstall 确认分支；命令表/存储选择/卸载章节已同步）
+- [x] pytest 覆盖：工具 handler、消息组装、截断逻辑、CLI 参数解析 ✅（M8 后 410 项；新增：预设数据完整性与顺序、变量名生成（空格/标点/非 ASCII/数字开头/官方名优先）、回退链三级优先（含 Z.ai 官方名与 SE_CodeAgent 兜底）、首次引导两分支（确认全流程进 REPL / 拒绝退出 2）、预设预填接受与修改、存储选择分支（明文/环境/中断保留/setx 失败回退/POSIX export）、config test 走回退链、/load 列表选择与历史打印、/delete 确认/取消/_last 可删、菜单自动时间戳与 6 分发、卸载两道确认/中断保留数据/数据删除与否/未装跳过/uv 失败兜底/脚本拼装/PATH 判定/删除目标护栏/spawn 双平台）
+- [x] ruff 全绿；公开函数有类型标注；命名自解释 ✅（M8：_offer_first_run_setup/_choose_provider_type/_input_base_url_and_models/_apply_key_storage/_write_env_var_key/_list_session_names/_choose_session/_print_session_history/_cmd_delete/_run_uninstall/_uv_tool_names/_should_remove_uv_path_entry/_windows_cleanup_script/_posix_cleanup_script/_spawn_cleanup_task/_delete_user_data 均带 docstring）
+- [x] 模块依赖方向符合 §3.4（无反向 / 越层 import） ✅（M8 无新增依赖方向；预设数据放 config 层，cli 仅消费；卸载的 subprocess 调用留在 cli 层（安装面/进程管理属 CLI 职责，不涉 agent/llm））
 - [x] `git status` 干净：无 venv/缓存/密钥/开发辅助文档被跟踪 ✅
-- [x] Design.md 与实现一致（模型、工具名、模块、入口、配置项、CLI 面） ✅（M7 回写：§7.1 裸入口行、头部目标形态说明、§10 M7 落地注记、§8.1/本节）
+- [x] Design.md 与实现一致（模型、工具名、模块、入口、配置项、CLI 面） ✅（M8 回写：头部状态、§8.1/§8.2/§8.3、§10 M8 落地注记；§5/§7.1/§7.3/§7.4 的 M8 修订在编码前已成文、实现与之逐条对齐）
 
 ### 8.3 复盘、缺陷记录与 PIP
 
@@ -356,6 +357,23 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
     - 复核轮（对象 = 修复后 src diff）：【一般】×2 + 【建议】×4——采纳落地：自动保留成功打印移入 try、退出码魔法值改 ConfigError 类型契约（拆 _config_interactive_session）、_run_chat docstring 更新（拆出 _repl_loop 后职责准确）、sessions 注释据实（".." 防护实由分隔符禁用承载）。现场发现一处测试设计缺陷并修正：patch load_raw 会连带破坏 REPL 启动解析（resolve 同源），改 patch _config_interactive_session 并把菜单内 load+session 整体纳入 try——对应"会话进行中配置损坏"的真实场景。
     - 终审（对象 = 复核后 src diff）：**0 严重**；【一般】×2（错误消息与正则不同步 → 采纳修复；_last 命名空间冲突 → 不采纳）+ 【建议】×3（均不采纳）。
     - **未采纳项记录**：① `_last` 独立保留名（初审/复核/终审三轮重提）：设计规格明文"覆盖写入 ~/.cra/sessions/_last.json"与"/resume = /load _last"，独立目录/不可构造名偏离规格；README 与 /help 已声明该名用途，用户显式 /save _last 即显式选择覆盖"最近会话"，语义自洽。② _hint_last_session 的 session_path 防御性 ValueError 包裹：`_last` 合法性由 test_session_path_accepts_leading_underscore 锁定，常量与校验同仓库演进，改名时测试先失败。③ 启动判空改文件大小启发式：会话文件 KB 级、启动解析一次成本微秒级，完整校验还保证损坏文件不触发误导性提示。④ --help 再显式点明裸形式限制：description 与 README 已写明"裸形式不带参数"。
+- **M8 编码期记录（2026-10-02，无严重遗留）**：
+  - **预设清单时效性复核（D17 要求的实现前逐项复核）**：按官方文档逐项核对——① DeepSeek：base_url `https://api.deepseek.com`、deepseek-flash / deepseek-v4-pro、DEEPSEEK_API_KEY 全部一致（api-docs.deepseek.com 原文）；② Kimi：`https://api.moonshot.cn/v1`、kimi-k3 / kimi-k2.6、MOONSHOT_API_KEY 一致（platform.kimi.com API 概述；域名已迁 platform.kimi.com 但 API 端点不变）；③ Z.ai：coding 端点 `/api/coding/paas/v4` 与普通端点 `/api/paas/v4` 均获官方文档确认、glm-5.3 在列；④ BigModel：`https://open.bigmodel.cn/api/paas/v4`（官方 API 参考）与 coding 端点（ZCode 官方文档等佐证）、glm-5.3 / glm-5.3-flash 均确认；⑤ 阿里云百炼：`https://dashscope.aliyuncs.com/compatible-mode/v1` 与 DASHSCOPE_API_KEY 获官方文档确认，qwen3.8-max/flash 未在本次搜索结果中直接确证；⑥ OpenAI：gpt-6-astra / gpt-6-luna 未在本次搜索中直接确证。⑤⑥ 按设计表（2026-10-02 当日已按官方文档核对）采用——D17 已内建时效性策略：预填项均可修改、`cra config test` 兜底验证，后续若模型更名由用户改预填即可，不构成阻塞。
+  - **Mimosa 钩子拦截与处置（写入期，同 M5 先例）**：拟引入 `ENV_API_KEY = "SE_CodeAgent"` 常量被拦为"硬编码凭据"（值是环境变量名非凭据，M5 已记录同型误报）→ 按 M5 处置先例不引入常量、维持既有 `os.environ.get("SE_CodeAgent")` 字面量形态，回退链函数内联该字面量；`env_var_for_provider` 的下划线拼接被启发式放行，无实际处置。
+  - **实现决策注记**（§7 落地细节，供验收留意）：
+    - 预设的"供应商名"即 models.json 的 name（如 "DeepSeek"、"Z.ai Coding Plan"，可直接用于 default 引用与 --provider）；预设两套 Z.ai/BigModel 共享官方惯用变量名（ZAI_API_KEY / ZHIPUAI_API_KEY）属官方形态。
+    - 自定义供应商变量名生成（cra 自审复核后定稿）：剥离后为空（纯非 ASCII/纯符号名）以名称 SHA256 摘要生成唯一变量名 `CRA_API_KEY_<hash8>`——不同供应商不得共用兜底名（否则 key 串用会把一家凭据发给另一家接入点）；首字符为数字前置 `_`（POSIX shell 标识符约束）；`_write_env_var_key` 写入前按 `^[A-Za-z_][A-Za-z0-9_]*$` 校验，非法回退明文。
+    - key 存储选环境变量：Windows setx + 当前进程 os.environ 即时生效；POSIX 打印 export（指令含 key 明文，随附保密提醒）**且当前进程同样设置**——本会话内 resolve 无断层，持久化靠用户执行 export。setx 失败/超长（>1000 字符，setx 对 >1024 静默截断）/变量名非法一律回退明文（有明确提示），key 不因存储失败而丢失。
+    - 中断语义统一（cra 自审复核）：`_ask` 返回 None（EOF/Ctrl+C）一律不视为确认——存储选择中断不写 key（保留现状）、卸载数据询问中断保留 ~/.cra/（数据含 key，宁可保留）；首次引导中断按拒绝落到既有指引。
+    - `_ask` 扩大捕获 OSError：stdin 被捕获/关闭的环境（pytest、无 stdin 管道）中"是否现在配置"按取消处理，落到既有指引 + 退出 2——这也是既有 `test_missing_key_exits_with_guide` 无输入 mock 仍通过的原因；`_read_key` 同口径。
+    - 首次引导只在"零供应商清单"时出现；已有供应商但缺默认/key 的场景维持原指引文案（两者是不同断层，后者一句指引即可解决）；向导内 load_raw 损坏时直接 return（防 save 覆盖用户损坏文件，调用顺序变化下的护栏）。
+    - 卸载的 PATH 移除判定在 spawn 时以当前 `uv tool list` 计算 remove_path（无其他工具才注入 PATH 清理块），脚本内卸载后复查（`$LASTEXITCODE -eq 0` 且列表为空才动手——防分离进程无 uv 时误判）双保险；`_delete_user_data` 删除前校验目录名确为 ".cra"（防 config 路径演化误删）；spawn 的 Popen 以 OSError 兜底（powershell/sh 缺失不崩卸载流程）。POSIX 不自动改 rc，仅打印待删行——装/卸与 key 存储三处口径一致（D17）。
+  - **测试注记**：354 → 410 项（+56）。`_write_env_var_key` 相关用例以 `monkeypatch.setattr(cli.os, "environ", dict(os.environ))` 隔离进程环境（断言"当前进程即时生效"且不污染真实环境；不能置空 dict——`Path.home()` 依赖 USERPROFILE，首版即踩此坑），并以 `monkeypatch.setattr(cli.sys, "platform", "win32")` 固定平台分支（断言 setx 的用例与运行平台解耦，cra 自审发现）。卸载用例全程 mock subprocess（Popen/run），绝不真实执行 uv/PATH 修改；`_run_config` 输入打桩统一为"耗尽即 EOFError"（与 test_cli._feed 同型，支撑中断语义用例）。
+  - **M8 cra 自审记录（DoD 第 4 条，2026-10-02，三轮：初审 + 复核 + 终审确认）**：
+    - 初审（`git diff -- src tests | cra review -`）：**【严重】×2**（POSIX export 回显 key 明文/进 shell 历史；POSIX 环境变量存储"key 可能永久丢失"）+ 【一般】×3 + 【建议】×4。处置：export 回显属 D17 规格明文（"POSIX 打印 export 指令由用户执行"），不采纳机制变更，采纳提示增强（随附保密提醒）；"key 丢失"实际是"当前进程不生效"的断层——采纳修复：POSIX 分支同样设置当前进程 os.environ + 明示"未执行 export 前新终端暂不可见"；`_delete_user_data` 数据源改 `config_path().parent` 并兜底 RuntimeError（采纳）；两个断言 setx 的用例固定平台（采纳）；`_uv_tool_names` 建议改 `uv tool list --json`——**实测锁定版 uv 不支持该旗标**（unexpected argument），不采纳，文本解析以测试锁定（§9 同类版本漂移风险）；PATH 比较小写归一（采纳）；显式 --model 时跳过向导（不采纳：显式参数在无配置时仍缺 key，向导正是解入口，EOF 场景已自动取消）；历史打印对非 dict 防御（初判不采纳——load_session 已校验外层，第三轮以新证据翻案，见终审）。
+    - 复核轮（对象 = 修复后 diff，审查者以 Python 实证复现关键项）：**【严重】×1**：`env_var_for_provider` 纯非 ASCII 名统一回退 `CRA_API_KEY`——不同供应商映射同一变量，key 串用会把 B 的凭据发给 A 的接入点（**跨供应商密钥泄露**，审查者实测多例）→ 采纳修复：剥离后为空改名称摘要唯一名。另采纳：数字开头变量名在 POSIX export 报非法标识符（前缀 `_`）+ 写入前变量名校验；卸载数据询问 None（Ctrl+C）当默认 Y（改为保留）；`.cra` 目录名护栏；`$LASTEXITCODE` 检查（防分离进程无 uv 误删 PATH）；存储选择中断语义；`_resolve_or_error` docstring 与调用点核对（grep 无旧名残留）。不采纳：POSIX 回显/`setx` argv 暴露（D17 规格机制，argv 暴露为 setx 固有属性）；os.environ 注入被子进程继承（run_python 环境净化已剔除 *API_KEY* 型变量，M4 自审机制覆盖）；uv 输出格式漂移（同初审）。
+    - 终审（对象 = 复核修复后 diff；期间两次再现 DSML 怪癖未出结论，第三次有效）：新发现采纳 4 项——`_print_session_history` 对脏数据 isinstance 设防（该调用在 try 外，防御成本低于论证成本，翻案初审判断）；`_read_key` 补 OSError 与 `_ask` 同口径；`_input_base_url_and_models` 各取消点补"已取消"反馈（旧实现行为，重构时静默了）；`_spawn_cleanup_task` 以 OSError 兜底并返回是否成功（powershell/sh 缺失不崩卸载流程）。等待循环无 PID 复用上限【建议】不采纳（后台 sleep 进程遗留无破坏性，PID 复用窗口极窄）。
+    - **修复有效性确认**：三轮全部采纳项均带回归用例落地，410 项 pytest 全绿 + ruff 全绿；跨供应商 key 串用（唯一严重级）由唯一性/稳定性/合法名三测锁定。
 - 估算偏差：规模见 §8.1（估算 ~1000 LOC → M3 收尾实测 3273 LOC）；人工投入与日历时间未逐项记录（见 §8.1 人工投入行）。
 - 过程问题：
 - PIP（下一项目为结对项目，将在本项目上增量开发与重构）：
@@ -414,6 +432,7 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
      **uv 行为实证（2026-10-02 本机受控实验，哑工具装/卸 + PATH 快照守卫）**：`uv tool install` 不自动加 PATH、缺失仅警告（验收环境问题的根因）；`uv tool uninstall` 只删工具环境与垫片、**不动 PATH 与用户数据**——PATH 清理与数据清理须本命令自理。边界：`uv tool list` 无 code-review-agent（如 `uv run` 方式使用）时跳过工具卸载并说明；PATH 条目被其他 uv 工具共享时保留（删净自己、不破坏他人）。
   范围理由：验收演示暴露首次使用断层（新机器无配置无环境变量）、会话管理便利性诉求与交付后干净退场的需要；估计 +550~850 LOC（含测试），1 个编码会话。
   **明确不做**：联网拉取模型清单（离线可用优先：内置清单 + 可编辑 + `cra config test` 验证）；自动改写 POSIX shell 配置文件（装/卸两侧一致，只给指令）；多套 key 轮换；静默卸载（`-y` 类无交互旗标——作业体量内保持交互确认）。
+  **落地注记（2026-10-02）**：① 预设清单实现前逐项复核结论见 §8.3 M8 记录（全部 base_url 与变量名与官方一致；OpenAI/百炼模型名按当日核对结论采用，预填可改 + config test 兜底）；② 预设的供应商名即 models.json name（"DeepSeek"、"Z.ai Coding Plan" 等），default 引用与 --provider 直接可用；③ key 存储选择统一入口 `_apply_key_storage`（添加/更新/引导三路复用），环境变量存储时 models.json 不落明文且已有明文移除，中断（EOF/Ctrl+C）一律不视为确认；④ 首次引导复用 `_config_add_provider` + `_config_set_default`（与 /setting 菜单同一套交互函数），仅在零供应商清单时出现；⑤ 卸载后台任务 Windows 为 detached PowerShell（等父进程 PID 退出 → uv tool uninstall → 无其他工具则 SetEnvironmentVariable 移除用户 PATH 条目）、POSIX 为 `sh -c` + start_new_session（仅等退出 + 卸载，PATH 打印指令不改 rc）；⑥ 实际净增 +1463 LOC（超估算主因卸载程序完整实现与交互分支用例面），测试 354→410 项。
 
 **作业二规划**（Simple Workflow MVP，不提前实现）：代码审查工作流方向——以本项目 Agent 为节点（§2.2 接缝），LangGraph `StateGraph` 编排"编码→审查→修复"或同等流程；顺序执行为 MVP，分支/并行/日志追踪按作业二推荐项递增。
 
