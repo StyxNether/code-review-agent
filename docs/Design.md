@@ -169,6 +169,7 @@ cra                              # 省略子命令：默认进入对话式审查
 cra chat   [选项]                  # 进入对话式审查 REPL
 cra review <path...> | -  [选项]   # 非交互一次性审查（- 读 stdin；多路径=批量）
 cra config [test]                  # 交互式配置模式；test 为连通性自检
+cra uninstall                      # 卸载本工具（M8）：程序/垫片/PATH/用户数据分级清理
 cra --version                      # 版本号
 ```
 
@@ -408,8 +409,11 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的 `.py`
   3. **key 存储选择**（D17）：明文 vs 环境变量；变量名规则、Windows `setx` 自动 + 进程内生效、POSIX 打印 `export`、models.json 不存明文/移除已有明文、resolve 回退链 `{PROVIDER}_API_KEY` → `SE_CodeAgent`（§5/§7.4 修订）；
   4. **会话管理**：`/load` 与菜单 4) 省略名称时列出会话数字选择；加载后自动打印全部历史；`/delete` + 菜单 6)（y/N 确认）；菜单 3) 保存回车自动时间戳命名（§7.3 修订）；
   5. **切换模型**：现有 `/change model` 已是"先供应商后模型"流程，仅补充**当前使用中**标记。
-  范围理由：验收演示暴露首次使用断层（新机器无配置无环境变量）与会话管理便利性诉求；估计 +400~600 LOC（含测试），1 个编码会话。
-  **明确不做**：联网拉取模型清单（离线可用优先：内置清单 + 可编辑 + `cra config test` 验证）；自动改写 POSIX shell 配置文件；多套 key 轮换。
+  6. **卸载程序 `cra uninstall`**（2026-10-02 用户提出：评审完要能删干净，与常见软件卸载程序同等彻底）：
+     交互确认（先清单式列出将删除内容，y/N **默认 N** 防误触发）→ 询问"同时删除用户数据 `~/.cra/`（models.json 含 API key、sessions/ 会话存档）"（y/N **默认 Y**——诉求即"删干净"，且清单明示含 key）→ 确认后：① 选删则删除 `~/.cra/`；② 生成**分离的后台清理任务**（等待当前进程退出后执行 `uv tool uninstall code-review-agent`——运行中的 venv 解释器文件被锁，须父进程退出后才能删净；Windows 用 detached 进程，POSIX 用 `nohup sh -c`），完成后若 `uv tool list` 无其他工具，再从用户 PATH 移除 `~/.local/bin` 条目（Windows 经 `[Environment]::SetEnvironmentVariable`，POSIX 打印待删的 shell 配置行指令、不自动改 rc，与 D17 口径一致）；③ 打印"程序将在退出后完成卸载"后正常退出。
+     **uv 行为实证（2026-10-02 本机受控实验，哑工具装/卸 + PATH 快照守卫）**：`uv tool install` 不自动加 PATH、缺失仅警告（验收环境问题的根因）；`uv tool uninstall` 只删工具环境与垫片、**不动 PATH 与用户数据**——PATH 清理与数据清理须本命令自理。边界：`uv tool list` 无 code-review-agent（如 `uv run` 方式使用）时跳过工具卸载并说明；PATH 条目被其他 uv 工具共享时保留（删净自己、不破坏他人）。
+  范围理由：验收演示暴露首次使用断层（新机器无配置无环境变量）、会话管理便利性诉求与交付后干净退场的需要；估计 +550~850 LOC（含测试），1 个编码会话。
+  **明确不做**：联网拉取模型清单（离线可用优先：内置清单 + 可编辑 + `cra config test` 验证）；自动改写 POSIX shell 配置文件（装/卸两侧一致，只给指令）；多套 key 轮换；静默卸载（`-y` 类无交互旗标——作业体量内保持交互确认）。
 
 **作业二规划**（Simple Workflow MVP，不提前实现）：代码审查工作流方向——以本项目 Agent 为节点（§2.2 接缝），LangGraph `StateGraph` 编排"编码→审查→修复"或同等流程；顺序执行为 MVP，分支/并行/日志追踪按作业二推荐项递增。
 
