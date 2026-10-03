@@ -13,7 +13,7 @@
 - 首次使用引导：新机器无任何配置时 `cra` 会询问"是否现在配置"，确认后按 添加供应商 → key → 设默认模型 引导完成并直接进入对话
 - 非交互审查：`cra review` 多路径批量、读 stdin、`-o` Markdown 报告、`--json` 结构化输出与分级退出码
 - 流式彩色输出（行级粒度：完整行即时渲染，围栏/列表整组不切段；`--no-stream` 可关）；LLM 瞬时失败自动重试（SDK 内建，认证错误快速失败）
-- 一键卸载：`cra uninstall` 两道确认后分级清理程序、垫片、PATH 条目与用户数据
+- 一键卸载：`cra uninstall` 多道交互确认后分级清理程序、垫片、PATH 条目、用户数据与本程序设置的环境变量
 
 ## 架构
 
@@ -152,6 +152,8 @@ uv run cra review a.py --json                   # 结构化 JSON 输出（stdout
 
 退出码：`0` 审查完成；`1` 仅 `--json` 模式下按 schema 的 `severity` 判定存在【严重】问题；`2` 运行错误（参数错误、配置缺失、网络/认证失败、文件不可读等，含顶层兜底）。非 `--json` 模式的结论是自由文本，不做分级匹配；需要程序化分级判定时必须用 `--json`。
 
+> 注意：`cra review` 为非交互模式，无法使用 `--ask-exec`/`/confirm` 逐次确认执行；审查不可信来源的代码时，Agent 仍可能按审查流程自主运行 run_python 核实问题（本机直接运行、非沙箱）。如需执行前逐次确认，请改用 `cra chat` 并开启 `/confirm on`。
+
 `--json` 输出 schema（stdin 输入时 `file` 为 `"<stdin>"`）：
 
 ```json
@@ -177,11 +179,11 @@ cra uninstall
 
 定位：**只删除项目文件夹之外、且由本程序产生的东西**——克隆的项目文件夹本身请自行删除（如 `rm -rf code-review-agent`），两者合起来即是完整退场。
 
-三道交互确认（第一道默认 **N** 防误触发，后两道默认 **Y** 满足"删干净"，Ctrl+C 一律保留）后分级清理：
+三道交互确认（第一道默认 **N** 防误触发，后两道默认 **Y** 满足"删干净"，Ctrl+C 一律保留；环境变量一问仅在存在已登记变量时出现）后分级清理：
 
 1. **清单确认**：列出将删除内容（uv 工具 `code-review-agent` 与 cra 垫片、PATH 条目、用户数据、本程序设置的环境变量清单），回车或 `n` 取消、不删除任何内容；
 2. **用户数据**：删除 `~/.cra/`（models.json 含 API key、sessions/ 会话存档、环境变量登记文件），答 `n` 保留；
-3. **环境变量**：仅清理 `~/.cra/env-vars.json` 中**登记在案**的变量（本程序 `setx` 写入过的），逐个列出明示——您已有的其它变量（含作业检查前就存在的 `CRA_DEEPSEEK_API_KEY`）绝不触碰；待删清单在删除 `~/.cra/` **之前**已读出（登记文件就在其中）；Windows 经 PowerShell 从用户环境移除（新开终端立即可见），macOS/Linux 打印待删的 export 行（不自动改 rc）；登记文件损坏时保守跳过；
+3. **环境变量**：仅清理 `~/.cra/env-vars.json` 中**登记在案**的变量（本程序 `setx` 写入过的），逐个列出明示——您已有的其它变量（例如您此前已自行设置的 `CRA_DEEPSEEK_API_KEY`）绝不触碰；待删清单在删除 `~/.cra/` **之前**已读出（登记文件就在其中）；Windows 经 PowerShell 从用户环境移除（新开终端立即可见），macOS/Linux 打印待删的 export 行（不自动改 rc）；登记文件损坏时保守跳过；
 4. **后台清理**：生成等待本进程退出后执行 `uv tool uninstall` 的分离后台任务（运行中的解释器文件被锁，须父进程退出后才能删净），完成后若已无其他 uv 工具，再从用户 PATH 移除 `~/.local/bin` 条目（Windows 自动；macOS/Linux 打印待删的 shell 配置行指令、不自动改 rc）；
 5. 打印"程序将在退出后完成卸载"后正常退出。
 
@@ -194,7 +196,7 @@ cra uninstall
 | 参数 | 说明 |
 |------|------|
 | `--model <name>` / `--provider <name>` | 临时覆盖本次使用的模型/供应商（不改配置文件） |
-| `--no-stream` | 关闭流式渲染，整体输出 |
+| `--no-stream` | 关闭流式渲染，整体输出（review 恒为非流式，此参数仅为参数面一致保留） |
 | `--max-rounds <n>` | 覆盖最大工具轮次（默认 10） |
 | `--ask-exec` | run_python 执行前逐次人工确认（默认自动执行；REPL 内 `/confirm on\|off` 同效）。仅限 chat；`cra review` 指定时报错退出 2 |
 
@@ -223,10 +225,11 @@ uv run ruff check .  # 代码规范检查
 
 项目结构与设计文档：[docs/Design.md](docs/Design.md)。
 
-## 效果截图
+## 效果演示
 
-（占位小节——截图由作者在提交前补充：单轮审查 / 多轮追问 / 边界样例表现，可对照
-`tests/fixtures/buggy_samples/` 中的样例演示超时强杀与非 Python 文件提示。）
+可对照 `tests/fixtures/buggy_samples/` 中的样例演示：单轮审查（syntax_error.py）、
+多轮追问、执行超时强杀（infinite_loop.py）、非 Python 文件提示（note.txt）与二进制
+文件兜底（binary.bin）；`cra review --json` 可观察结构化输出与分级退出码。
 
 ## Roadmap
 
@@ -238,4 +241,4 @@ uv run ruff check .  # 代码规范检查
 
 ---
 
-本项目由 AI 编码会话辅助开发；人机分工与开发过程记录见 [docs/Design.md](docs/Design.md) §8。
+本项目由 AI 编码工具辅助开发（人工负责设计评审与逐里程碑验收）；人机分工与开发过程记录见 [docs/Design.md](docs/Design.md) §8。
