@@ -101,7 +101,7 @@ uv run cra config test   # 连通性自检：对每个供应商发一次 max_tok
 
 ```text
 $ uv run cra
-code-review-agent 已就绪（模型：deepseek/deepseek-flash）。提出审查需求即可；输入 /help 查看命令，exit 或 /exit 退出。
+code-review-agent 已就绪（模型：DeepSeek/deepseek-flash）。提出审查需求即可；输入 /help 查看命令，exit 或 /exit 退出。
 你> 审查 src/cra/agent.py
 ⚙ read_file({"path": "src/cra/agent.py"})
   ↳ 完成（9xxx 字符）
@@ -126,7 +126,7 @@ code-review-agent 已就绪（模型：deepseek/deepseek-flash）。提出审查
 | `/help` | 命令列表 |
 | `/clear` | 清空上下文（系统提示词保留） |
 | `/change model`（别名 `/model`） | 列出供应商与模型清单（标注"当前使用中"）、序号切换；上下文保留 |
-| `/setting` | 设置菜单（数字选择）：切模型 / 配置模型列表 / 保存 / 加载 / 删除会话 / 执行确认开关；0 或回车返回对话 |
+| `/setting` | 设置菜单（数字选择）：切模型 / 配置模型列表 / 保存 / 加载 / 执行确认开关 / 删除会话；0 或回车返回对话 |
 | `/save [名称]` | 会话持久化到 `~/.cra/sessions/<名称>.json`（省略名称自动以时间戳命名） |
 | `/load [名称]` | 恢复会话（整体替换当前会话）；省略名称时列出会话数字选择（回车取消）；加载成功后自动打印全部会话历史 |
 | `/delete` | 删除会话：列表数字选择 + y/N 确认（`_last` 同样可删） |
