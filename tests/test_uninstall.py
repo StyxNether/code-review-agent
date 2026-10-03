@@ -364,8 +364,8 @@ class TestUninstallEnvVars:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
     ) -> None:
         """登记在案的变量在数据确认后默认清理：powershell 清用户环境 + 当前进程 pop。"""
-        self._seed_registry(home_dir, "DEEPSEEK_API_KEY", "MY_KEY")
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-a")
+        self._seed_registry(home_dir, "CRA_DEEPSEEK_API_KEY", "MY_KEY")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-a")
         monkeypatch.setenv("MY_KEY", "placeholder-b")
         _patch_popen(monkeypatch)
         _patch_run_split(monkeypatch, "code-review-agent v0.1.0\n- cra\n")
@@ -375,9 +375,9 @@ class TestUninstallEnvVars:
         cli._run_uninstall()
 
         out = capsys.readouterr().out
-        assert "DEEPSEEK_API_KEY, MY_KEY" in out  # 清单明示变量名
+        assert "CRA_DEEPSEEK_API_KEY, MY_KEY" in out  # 清单明示变量名
         assert "已删除 2 个本程序设置的环境变量" in out
-        assert "DEEPSEEK_API_KEY" not in os.environ  # 当前进程也清掉
+        assert "CRA_DEEPSEEK_API_KEY" not in os.environ  # 当前进程也清掉
         assert "MY_KEY" not in os.environ
         assert "程序将在退出后完成卸载" in out
 
@@ -385,7 +385,7 @@ class TestUninstallEnvVars:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path
     ) -> None:
         """清理命令只含登记清单内的变量名（powershell 脚本逐字核对）。"""
-        self._seed_registry(home_dir, "DEEPSEEK_API_KEY", "MY_KEY")
+        self._seed_registry(home_dir, "CRA_DEEPSEEK_API_KEY", "MY_KEY")
         _patch_popen(monkeypatch)
         _run_calls, ps_calls = _patch_run_split(
             monkeypatch, "code-review-agent v0.1.0\n- cra\n"
@@ -396,7 +396,7 @@ class TestUninstallEnvVars:
 
         assert len(ps_calls) == 1
         script = ps_calls[0][-1]
-        assert "'DEEPSEEK_API_KEY'" in script and "'MY_KEY'" in script
+        assert "'CRA_DEEPSEEK_API_KEY'" in script and "'MY_KEY'" in script
         assert "[Environment]::SetEnvironmentVariable($name, $null, 'User')" in script
         assert any(cmd[0] == "uv" for cmd in _run_calls)  # uv tool list 仍被用于工具判定
 

@@ -225,11 +225,11 @@ def _short(text: str, limit: int = _TOOL_ARGS_PREVIEW_LIMIT) -> str:
 
 
 def _setup_hint() -> str:
-    """key 设置命令按当前平台给出。"""
+    """key 设置命令按当前平台给出（默认供应商 DeepSeek 的统一变量名）。"""
     if sys.platform == "win32":
-        return '设置方法（Windows）：setx SE_CodeAgent "sk-你的key"，然后新开终端重试。'
+        return "设置方法（Windows）：setx CRA_DEEPSEEK_API_KEY <你的key>，然后新开终端重试。"
     return (
-        '设置方法（macOS/Linux）：export SE_CodeAgent="sk-你的key"'
+        "设置方法（macOS/Linux）：export CRA_DEEPSEEK_API_KEY=<你的key>"
         "（写入 ~/.bashrc 或 ~/.zshrc 可持久化）。"
     )
 
@@ -247,12 +247,13 @@ def _print_config_guide(console: Console) -> None:
         providers = []
     if providers:
         console.print(
-            "已配置供应商但未设置默认模型，且环境变量 SE_CodeAgent 也未设置。", markup=False
+            "已配置供应商但未设置默认模型，且密钥环境变量也未设置。", markup=False
         )
         console.print("请运行 cra config 设置默认，或用 --model/--provider 临时指定。", markup=False)
         return
     console.print(
-        "未找到任何可用配置：既无 ~/.cra/models.json，也未设置环境变量 SE_CodeAgent。",
+        "未找到任何可用配置：既无 ~/.cra/models.json，也未设置密钥环境变量"
+        "（如 CRA_DEEPSEEK_API_KEY）。",
         markup=False,
     )
     console.print("请先完成以下任一配置：", markup=False)
@@ -1645,7 +1646,7 @@ def _run_config_test() -> None:
     for entry in providers:
         name = entry["name"]
         model_name = entry["models"][0]
-        # 与 resolve 同一条回退链：条目 api_key → {PROVIDER}_API_KEY → SE_CodeAgent
+        # 与 resolve 同一条回退链：条目 api_key → CRA_供应商名大写_API_KEY → SE_CodeAgent
         api_key = config.resolve_provider_api_key(name, entry.get("api_key"))
         if not api_key:
             console.print(

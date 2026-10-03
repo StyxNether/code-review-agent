@@ -365,7 +365,7 @@ class TestRunBasics:
         assert len(deltas) >= 2  # 分片到达，而非一次性全文
 
     def test_display_model_name_falls_back_to_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setenv("CRA_MODEL", "env-model")
 
         agent, _ = make_agent([])

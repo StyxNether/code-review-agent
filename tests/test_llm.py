@@ -55,7 +55,7 @@ class _FakeModel(BaseChatModel):
 
 class TestCreateModel:
     def test_reads_env_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test-key")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setenv("CRA_MODEL", "custom-model")
         monkeypatch.setenv("CRA_BASE_URL", "https://llm.example.com")
 
@@ -67,7 +67,7 @@ class TestCreateModel:
         assert model.request_timeout == llm.REQUEST_TIMEOUT_SECONDS
 
     def test_defaults_when_env_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test-key")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.delenv("CRA_MODEL", raising=False)
         monkeypatch.delenv("CRA_BASE_URL", raising=False)
 
@@ -77,27 +77,28 @@ class TestCreateModel:
         assert model.openai_api_base == "https://api.deepseek.com"
 
     def test_explicit_model_name_overrides_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test-key")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setenv("CRA_MODEL", "env-model")
 
         assert llm.create_model(model_name="override-model").model_name == "override-model"
 
     def test_missing_api_key_raises_llm_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """不依赖 SDK 的 OPENAI_API_KEY 回退（避免把 OpenAI 密钥发往 CRA_BASE_URL）。"""
+        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("SE_CodeAgent", raising=False)
 
-        with pytest.raises(llm.LLMError, match="SE_CodeAgent"):
+        with pytest.raises(llm.LLMError, match="CRA_DEEPSEEK_API_KEY"):
             llm.create_model()
 
     def test_d13_retry_mapped_to_sdk(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """D13：瞬时错误重试经 SDK 承担（max_retries=3），不在应用层重复实现。"""
-        monkeypatch.setenv("SE_CodeAgent", "sk-test-key")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
 
         assert llm.create_model().max_retries == llm.MAX_RETRIES
 
     def test_stream_usage_enabled_explicitly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """usage 是截断触发与 /context 的数据源，须显式开启。"""
-        monkeypatch.setenv("SE_CodeAgent", "sk-test-key")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
 
         assert llm.create_model().stream_usage is True
 
@@ -115,7 +116,7 @@ class TestTranslateFailure:
 
         assert isinstance(translated, llm.LLMError)
         assert "401" in str(translated)
-        assert "SE_CodeAgent" in str(translated)
+        assert "CRA_DEEPSEEK_API_KEY" in str(translated)
 
     def test_auth_403_fails_fast_with_guidance(self) -> None:
         translated = llm.translate_failure(_http_error(APIStatusError, 403))
@@ -200,6 +201,7 @@ class TestCreateModelExplicitParams:
     """cra config test 按供应商显式传 key/接入点;不回退环境变量。"""
 
     def test_explicit_params_take_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("SE_CodeAgent", raising=False)
 
         model = llm.create_model(
@@ -210,7 +212,7 @@ class TestCreateModelExplicitParams:
         assert model.openai_api_base == "https://probe.example.com"
 
     def test_env_fallback_when_explicit_omitted(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SE_CodeAgent", _EXPLICIT_KEY)
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", _EXPLICIT_KEY)
 
         assert llm.create_model().openai_api_base == "https://api.deepseek.com"
 

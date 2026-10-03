@@ -19,11 +19,18 @@ _PLACEHOLDER_ENV = "placeholder-env"
 
 
 def test_api_key_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SE_CodeAgent", "sk-test-key")
-    assert config.get_api_key() == "sk-test-key"
+    monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", _PLACEHOLDER_ENV)
+    assert config.get_api_key() == _PLACEHOLDER_ENV
+
+
+def test_api_key_falls_back_to_legacy_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("SE_CodeAgent", _PLACEHOLDER_B)
+    assert config.get_api_key() == _PLACEHOLDER_B
 
 
 def test_api_key_unset_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("SE_CodeAgent", raising=False)
     assert config.get_api_key() is None
 
@@ -207,14 +214,14 @@ class TestResolve:
     @pytest.fixture(autouse=True)
     def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """resolve 的环境变量回退路径受真实环境影响,统一清空。"""
-        for name in ("SE_CodeAgent", "CRA_MODEL", "CRA_BASE_URL"):
+        for name in ("SE_CodeAgent", "CRA_DEEPSEEK_API_KEY", "CRA_MODEL", "CRA_BASE_URL"):
             monkeypatch.delenv(name, raising=False)
 
     def test_nothing_configured_returns_none(self, home_dir: Path) -> None:
         assert config.resolve() is None
 
     def test_env_fallback(self, home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SE_CodeAgent", _PLACEHOLDER_ENV)
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", _PLACEHOLDER_ENV)
 
         resolved = config.resolve()
 
@@ -225,7 +232,7 @@ class TestResolve:
 
     def test_args_model_overrides_env_model(self, home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """无供应商清单时 --model 直接覆盖 CRA_MODEL(优先级:参数 > 环境变量)。"""
-        monkeypatch.setenv("SE_CodeAgent", _PLACEHOLDER_ENV)
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", _PLACEHOLDER_ENV)
         monkeypatch.setenv("CRA_MODEL", "env-model")
 
         resolved = config.resolve(model="arg-model")
@@ -235,7 +242,7 @@ class TestResolve:
 
     def test_file_default_wins_over_env(self, home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """优先级:配置文件 default > 环境变量。"""
-        monkeypatch.setenv("SE_CodeAgent", _PLACEHOLDER_ENV)
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", _PLACEHOLDER_ENV)
         _write_models_json(home_dir, {"default": "deepseek/deepseek-v4-pro", "providers": _sample_providers()})
 
         resolved = config.resolve()
@@ -320,8 +327,8 @@ class TestResolve:
             config.resolve()
 
     def test_provider_key_falls_back_to_env(self, home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """provider 条目缺 api_key 时回退环境变量(是否有效由认证环节暴露)。"""
-        monkeypatch.setenv("SE_CodeAgent", _PLACEHOLDER_ENV)
+        """provider 条目缺 api_key 时回退其 CRA_供应商名大写_API_KEY 环境变量。"""
+        monkeypatch.setenv("CRA_SOLO_API_KEY", _PLACEHOLDER_ENV)
         entry = _provider_entry("solo", "https://solo.example.com", ["solo-model"])
         _write_models_json(home_dir, {"default": "solo/solo-model", "providers": [entry]})
 
@@ -360,18 +367,18 @@ class TestProviderPresets:
         assert first.name == "DeepSeek"
         assert first.base_url == "https://api.deepseek.com"
         assert first.models == ("deepseek-flash", "deepseek-v4-pro")
-        assert first.env_var == "DEEPSEEK_API_KEY"
+        assert first.env_var == "CRA_DEEPSEEK_API_KEY"
 
 
 class TestEnvVarGeneration:
-    """变量名生成规则（D17）：大写、空格与非字母数字转 _、非 ASCII 剥离。"""
+    """变量名生成规则：CRA_ 前缀 + 大写、空格与非字母数字转 _、非 ASCII 剥离。"""
 
     def test_space_and_punctuation_become_underscores(self) -> None:
-        assert config.env_var_for_provider("My Provider") == "MY_PROVIDER_API_KEY"
-        assert config.env_var_for_provider("z.ai") == "Z_AI_API_KEY"
+        assert config.env_var_for_provider("My Provider") == "CRA_MY_PROVIDER_API_KEY"
+        assert config.env_var_for_provider("z.ai") == "CRA_Z_AI_API_KEY"
 
     def test_non_ascii_stripped(self) -> None:
-        assert config.env_var_for_provider("智谱 AI") == "AI_API_KEY"  # 部分非 ASCII 仍按规则
+        assert config.env_var_for_provider("智谱 AI") == "CRA_AI_API_KEY"  # 部分非 ASCII 仍按规则
 
     def test_pure_non_ascii_names_get_unique_stable_vars(self) -> None:
         """纯非 ASCII 名剥离后为空：以名称摘要生成唯一变量名。
@@ -383,35 +390,35 @@ class TestEnvVarGeneration:
         b = config.env_var_for_provider("腾讯云")
         assert a != b
         assert a == config.env_var_for_provider("阿里云百炼")
-        assert re.fullmatch(r"CRA_API_KEY_[0-9A-F]{8}", a)
+        assert re.fullmatch(r"CRA_[0-9A-F]{8}_API_KEY", a)
 
-    def test_digit_leading_name_gets_posix_safe_prefix(self) -> None:
-        """首字符为数字的变量名前置 `_`（POSIX shell 标识符不得以数字开头）。"""
+    def test_digit_leading_name_valid_with_prefix(self) -> None:
+        """CRA_ 前缀保证变量名不以数字开头（数字开头的供应商名直接可用）。"""
         var = config.env_var_for_provider("3rdparty")
-        assert var == "_3RDPARTY_API_KEY"
+        assert var == "CRA_3RDPARTY_API_KEY"
         assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", var)
 
-    def test_provider_env_var_prefers_preset_official_names(self) -> None:
-        """预设供应商用官方惯用名（Z.ai 生成形应为 Z_AI_…，官方为 ZAI_API_KEY）。"""
-        assert config.provider_env_var("Z.ai Coding Plan") == "ZAI_API_KEY"
-        assert config.provider_env_var("BigModel API") == "ZHIPUAI_API_KEY"
-        assert config.provider_env_var("myprov") == "MYPROV_API_KEY"
+    def test_provider_env_var_prefers_preset_names(self) -> None:
+        """预设供应商的变量名同为 CRA_ 统一格式（预设名取规范短名）。"""
+        assert config.provider_env_var("Z.ai Coding Plan") == "CRA_ZAI_API_KEY"
+        assert config.provider_env_var("BigModel API") == "CRA_ZHIPUAI_API_KEY"
+        assert config.provider_env_var("myprov") == "CRA_MYPROV_API_KEY"
 
 
 class TestResolveKeyChain:
-    """key 三级回退链（D17）：条目 api_key → {PROVIDER}_API_KEY → SE_CodeAgent。"""
+    """key 回退链：条目 api_key → CRA_供应商名大写_API_KEY → SE_CodeAgent（历史变量）。"""
 
     @pytest.fixture(autouse=True)
     def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for name in ("SE_CodeAgent", "MYPROV_API_KEY", "DEEPSEEK_API_KEY"):
+        for name in ("SE_CodeAgent", "CRA_MYPROV_API_KEY", "CRA_DEEPSEEK_API_KEY"):
             monkeypatch.delenv(name, raising=False)
 
     def test_entry_key_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("MYPROV_API_KEY", _PLACEHOLDER_ENV)
+        monkeypatch.setenv("CRA_MYPROV_API_KEY", _PLACEHOLDER_ENV)
         assert config.resolve_provider_api_key("myprov", _PLACEHOLDER_A) == _PLACEHOLDER_A
 
     def test_provider_env_var_second(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("MYPROV_API_KEY", _PLACEHOLDER_ENV)
+        monkeypatch.setenv("CRA_MYPROV_API_KEY", _PLACEHOLDER_ENV)
         monkeypatch.setenv("SE_CodeAgent", _PLACEHOLDER_B)
         assert config.resolve_provider_api_key("myprov", None) == _PLACEHOLDER_ENV
 
@@ -422,14 +429,14 @@ class TestResolveKeyChain:
     def test_none_when_all_missing(self) -> None:
         assert config.resolve_provider_api_key("myprov", None) is None
 
-    def test_preset_provider_uses_official_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """预设供应商查官方惯用名而非规则生成名（DeepSeek 两者巧合一致，用 Z.ai 验证）。"""
-        monkeypatch.setenv("ZAI_API_KEY", _PLACEHOLDER_ENV)
+    def test_preset_provider_uses_preset_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """预设供应商查预设变量名而非规则生成名（规则生成形为 CRA_Z_AI_API_KEY，用 Z.ai 验证）。"""
+        monkeypatch.setenv("CRA_ZAI_API_KEY", _PLACEHOLDER_ENV)
         assert config.resolve_provider_api_key("Z.ai API", None) == _PLACEHOLDER_ENV
 
     def test_resolve_via_provider_chain(self, home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """resolve() 走同一回退链：条目无 key、供应商环境变量有值时解析成功。"""
-        monkeypatch.setenv("MYPROV_API_KEY", _PLACEHOLDER_ENV)
+        monkeypatch.setenv("CRA_MYPROV_API_KEY", _PLACEHOLDER_ENV)
         entry = _provider_entry("myprov", "https://solo.example.com", ["solo-model"])
         _write_models_json(home_dir, {"default": "myprov/solo-model", "providers": [entry]})
 
@@ -443,11 +450,11 @@ class TestEnvRegistry:
     """环境变量登记层（设置时登记、卸载时只清登记在案的变量）。"""
 
     def test_register_roundtrip_and_dedupe(self, home_dir: Path) -> None:
-        config.register_env_var("DEEPSEEK_API_KEY")
+        config.register_env_var("CRA_DEEPSEEK_API_KEY")
         config.register_env_var("MY_KEY")
-        config.register_env_var("DEEPSEEK_API_KEY")  # 重复登记去重
+        config.register_env_var("CRA_DEEPSEEK_API_KEY")  # 重复登记去重
 
-        assert config.registered_env_vars() == ["DEEPSEEK_API_KEY", "MY_KEY"]
+        assert config.registered_env_vars() == ["CRA_DEEPSEEK_API_KEY", "MY_KEY"]
         assert config.env_registry_path().name == "env-vars.json"
         assert config.env_registry_path().exists()
 

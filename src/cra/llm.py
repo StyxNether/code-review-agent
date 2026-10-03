@@ -29,18 +29,18 @@ PROBE_MAX_TOKENS = 1  # 连通性自检只发一次 max_tokens=1 的最小请求
 
 
 def _key_hint() -> str:
-    """key 设置命令按当前平台给出。"""
+    """key 设置命令按当前平台给出（默认供应商 DeepSeek 的统一变量名）。"""
     if sys.platform == "win32":
-        return 'Windows：setx SE_CodeAgent "sk-你的key"，然后新开终端生效'
-    return 'macOS/Linux：export SE_CodeAgent="sk-你的key"（写入 ~/.bashrc 或 ~/.zshrc 持久化）'
+        return "Windows：setx CRA_DEEPSEEK_API_KEY <你的key>，然后新开终端生效"
+    return "macOS/Linux：export CRA_DEEPSEEK_API_KEY=<你的key>（写入 ~/.bashrc 或 ~/.zshrc 持久化）"
 
 
 def _auth_guidance() -> str:
     """认证失败的排查指引（401/403 快速失败时随错误给出）。"""
     return (
         "认证失败（HTTP 401/403）：API key 无效、未激活或无权访问该模型，已停止重试。"
-        "请检查环境变量 SE_CodeAgent 是否为有效的 DeepSeek API key；"
-        f"修改方法（{_key_hint()}）。"
+        "请用 cra config 检查该供应商的 key（或其环境变量，如 CRA_DEEPSEEK_API_KEY）；"
+        f"设置方法（{_key_hint()}）。"
     )
 
 
@@ -62,7 +62,10 @@ def create_model(
     """
     key = api_key if api_key is not None else config.get_api_key()
     if not key:
-        raise LLMError("未设置环境变量 SE_CodeAgent（DeepSeek API key）。")
+        raise LLMError(
+            "未配置 API key：请运行 cra config，或设置环境变量 CRA_DEEPSEEK_API_KEY"
+            "（使用环境变量回退方式时默认供应商为 DeepSeek）。"
+        )
     return ChatOpenAI(
         model=model_name if model_name is not None else config.get_model(),
         api_key=key,
@@ -123,7 +126,7 @@ def probe(base_url: str, api_key: str, model_name: str) -> tuple[str, str]:
     """
     if not api_key:
         # 与 create_model 的显式校验一致：空 key 不应发到服务端换回误导性的 401
-        return "error", "API key 为空；请用 cra config 补充或设置环境变量 SE_CodeAgent。"
+        return "error", "API key 为空；请用 cra config 补充，或设置环境变量 CRA_DEEPSEEK_API_KEY。"
     model = ChatOpenAI(
         model=model_name,
         api_key=api_key,

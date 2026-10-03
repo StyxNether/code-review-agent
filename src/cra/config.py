@@ -27,7 +27,7 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class ProviderPreset:
-    """供应商预设：官方接入点 + 预填模型清单 + key 官方惯用变量名。
+    """供应商预设：官方接入点 + 预填模型清单 + key 环境变量名（CRA_ 统一格式）。
 
     预填项均可在交互中修改；模型名有时效性，cra config test 可兜底验证。
     """
@@ -40,52 +40,52 @@ class ProviderPreset:
 
 PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
-        "DeepSeek", "https://api.deepseek.com", ("deepseek-flash", "deepseek-v4-pro"), "DEEPSEEK_API_KEY"
+        "DeepSeek", "https://api.deepseek.com", ("deepseek-flash", "deepseek-v4-pro"), "CRA_DEEPSEEK_API_KEY"
     ),
     ProviderPreset(
-        "Kimi (Moonshot)", "https://api.moonshot.cn/v1", ("kimi-k3", "kimi-k2.6"), "MOONSHOT_API_KEY"
+        "Kimi (Moonshot)", "https://api.moonshot.cn/v1", ("kimi-k3", "kimi-k2.6"), "CRA_MOONSHOT_API_KEY"
     ),
     ProviderPreset(
-        "OpenAI", "https://api.openai.com/v1", ("gpt-6-astra", "gpt-6-luna"), "OPENAI_API_KEY"
+        "OpenAI", "https://api.openai.com/v1", ("gpt-6-astra", "gpt-6-luna"), "CRA_OPENAI_API_KEY"
     ),
     ProviderPreset(
         "阿里云百炼",
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
         ("qwen3.8-max", "qwen3.8-flash"),
-        "DASHSCOPE_API_KEY",
+        "CRA_DASHSCOPE_API_KEY",
     ),
     ProviderPreset(
         "Z.ai Coding Plan",
         "https://api.z.ai/api/coding/paas/v4",
         ("glm-5.3", "glm-5.3-flash"),
-        "ZAI_API_KEY",
+        "CRA_ZAI_API_KEY",
     ),
     ProviderPreset(
-        "Z.ai API", "https://api.z.ai/api/paas/v4", ("glm-5.3", "glm-5.3-flash"), "ZAI_API_KEY"
+        "Z.ai API", "https://api.z.ai/api/paas/v4", ("glm-5.3", "glm-5.3-flash"), "CRA_ZAI_API_KEY"
     ),
     ProviderPreset(
         "BigModel Coding Plan",
         "https://open.bigmodel.cn/api/coding/paas/v4",
         ("glm-5.3", "glm-5.3-flash"),
-        "ZHIPUAI_API_KEY",
+        "CRA_ZHIPUAI_API_KEY",
     ),
     ProviderPreset(
         "BigModel API",
         "https://open.bigmodel.cn/api/paas/v4",
         ("glm-5.3", "glm-5.3-flash"),
-        "ZHIPUAI_API_KEY",
+        "CRA_ZHIPUAI_API_KEY",
     ),
 )
 
 
 def env_var_for_provider(name: str) -> str:
-    """自定义供应商 → 默认 key 环境变量名。
+    """自定义供应商 → key 环境变量名：CRA_供应商名大写_API_KEY（全供应商统一格式）。
 
-    规则：大写、空格与非字母数字转 `_`、`_API_KEY` 后缀；非 ASCII 字符剥离。
-    退化输入的处理：① 剥离后为空（纯非 ASCII/纯符号名）时以名称摘要生成唯一
-    变量名——不同供应商不得共用同一兜底名，否则 key 串用会把一家凭据发给另一
-    家的接入点；② 首字符为数字时前置 `_`（POSIX shell 标识符不得以数字开头，
-    否则 export 指令无法执行）。
+    规则：`CRA_` 前缀 + 供应商名大写、空格与非字母数字转 `_` + `_API_KEY` 后缀；
+    非 ASCII 字符剥离（前缀已保证变量名不以数字开头）。退化输入的处理：剥离后
+    为空（纯非 ASCII/纯符号名）时以名称摘要生成唯一变量名 `CRA_<摘要>_API_KEY`
+    ——不同供应商不得共用同一兜底名，否则 key 串用会把一家凭据发给另一家的
+    接入点。
     """
     parts: list[str] = []
     for char in name.upper():
@@ -96,14 +96,12 @@ def env_var_for_provider(name: str) -> str:
     stem = "".join(parts).strip("_")
     if not stem:
         digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8].upper()
-        return f"CRA_API_KEY_{digest}"
-    if stem[0].isdigit():
-        stem = f"_{stem}"
-    return f"{stem}_API_KEY"
+        return f"CRA_{digest}_API_KEY"
+    return f"CRA_{stem}_API_KEY"
 
 
 def provider_env_var(name: str) -> str:
-    """供应商 key 的回退环境变量名：预设供应商用官方惯用名，自定义按规则生成。"""
+    """供应商 key 的回退环境变量名：预设与自定义统一为 CRA_ 前缀格式。"""
     for preset in PROVIDER_PRESETS:
         if preset.name == name:
             return preset.env_var
@@ -111,7 +109,7 @@ def provider_env_var(name: str) -> str:
 
 
 def resolve_provider_api_key(name: str, entry_api_key: str | None) -> str | None:
-    """供应商 key 三级回退链：条目 api_key → {PROVIDER}_API_KEY → SE_CodeAgent。
+    """供应商 key 回退链：条目 api_key → CRA_供应商名大写_API_KEY → SE_CodeAgent（历史变量）。
 
     key 是否有效（与供应商匹配）由 API 认证环节暴露，此处只做存在性回退。
     """
@@ -192,8 +190,11 @@ def config_path() -> Path:
 
 
 def get_api_key() -> str | None:
-    """读取 DeepSeek API key（仅校验非空，不校验格式，无效 key 由 API 认证环节暴露）。"""
-    return os.environ.get("SE_CodeAgent")
+    """默认供应商（DeepSeek）的 key 环境变量回退：CRA_DEEPSEEK_API_KEY → SE_CodeAgent（历史变量）。
+
+    仅校验非空，不校验格式，无效 key 由 API 认证环节暴露。
+    """
+    return os.environ.get("CRA_DEEPSEEK_API_KEY") or os.environ.get("SE_CodeAgent")
 
 
 def get_model() -> str:
@@ -386,7 +387,7 @@ def resolve(
         provider_name, _, model_name = str(default).partition("/")
         return _resolve_provider(providers, provider_name, model_name)
     # 环境变量回退；无供应商清单时 --model 直接覆盖 CRA_MODEL
-    api_key = os.environ.get("SE_CodeAgent")
+    api_key = get_api_key()
     if not api_key:
         return None
     return ResolvedModel(

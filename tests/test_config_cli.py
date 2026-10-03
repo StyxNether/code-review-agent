@@ -225,6 +225,7 @@ class TestConfigTest:
     @pytest.fixture(autouse=True)
     def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """探测的 key 回退读真实环境变量,测试中统一清空。"""
+        monkeypatch.delenv("CRA_CRA_DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("SE_CodeAgent", raising=False)
 
     def _patch_probes(
@@ -374,8 +375,8 @@ class TestKeyStorageChoice:
     @pytest.fixture(autouse=True)
     def _clean_provider_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """环境变量存储分支的用例不得受真实环境同名变量影响（否则会触发覆盖确认）。"""
-        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-        monkeypatch.delenv("MYPROV_API_KEY", raising=False)
+        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("CRA_MYPROV_API_KEY", raising=False)
 
     def test_plaintext_choice_keeps_current_behavior(
         self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
@@ -406,8 +407,8 @@ class TestKeyStorageChoice:
 
         entry = config.load_raw()["providers"][0]
         assert "api_key" not in entry
-        assert run_calls and run_calls[0][:2] == ["setx", "DEEPSEEK_API_KEY"]
-        assert os.environ.get("DEEPSEEK_API_KEY") == _PLACEHOLDER_UPDATED
+        assert run_calls and run_calls[0][:2] == ["setx", "CRA_DEEPSEEK_API_KEY"]
+        assert os.environ.get("CRA_DEEPSEEK_API_KEY") == _PLACEHOLDER_UPDATED
         assert "已写入用户环境变量" in capsys.readouterr().out
 
     def test_setx_failure_falls_back_to_plaintext(
@@ -426,7 +427,7 @@ class TestKeyStorageChoice:
 
         entry = config.load_raw()["providers"][0]
         assert entry["api_key"] == _PLACEHOLDER_UPDATED
-        assert os.environ.get("DEEPSEEK_API_KEY") is None  # 失败路径不写进程环境
+        assert os.environ.get("CRA_DEEPSEEK_API_KEY") is None  # 失败路径不写进程环境
         assert "setx 写入失败" in capsys.readouterr().out
 
     def test_posix_prints_export_instruction(
@@ -440,9 +441,9 @@ class TestKeyStorageChoice:
         _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
 
         out = capsys.readouterr().out
-        assert "export DEEPSEEK_API_KEY=" in out
+        assert "export CRA_DEEPSEEK_API_KEY=" in out
         assert "勿粘贴到公共场合" in out  # 明文回显的保密提醒
-        assert os.environ.get("DEEPSEEK_API_KEY") == _PLACEHOLDER_UPDATED  # 本会话无断层
+        assert os.environ.get("CRA_DEEPSEEK_API_KEY") == _PLACEHOLDER_UPDATED  # 本会话无断层
         assert "api_key" not in config.load_raw()["providers"][0]
 
     def test_storage_choice_interrupt_keeps_existing_key(
@@ -467,7 +468,7 @@ class TestKeyStorageChoice:
         _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
 
         assert "api_key" not in config.load_raw()["providers"][0]
-        assert config.provider_env_var("My Provider") == "MY_PROVIDER_API_KEY"
+        assert config.provider_env_var("My Provider") == "CRA_MY_PROVIDER_API_KEY"
 
     def test_successful_env_write_registers_var(
         self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
@@ -479,7 +480,7 @@ class TestKeyStorageChoice:
 
         _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
 
-        assert config.registered_env_vars() == ["DEEPSEEK_API_KEY"]
+        assert config.registered_env_vars() == ["CRA_DEEPSEEK_API_KEY"]
 
 
 class TestEnvVarOverwriteGuard:
@@ -487,22 +488,22 @@ class TestEnvVarOverwriteGuard:
 
     @pytest.fixture(autouse=True)
     def _clean_provider_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
 
     def test_foreign_var_confirmed_overwrites_and_registers(
         self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
     ) -> None:
         """同名变量非本程序所设：询问后答 y → setx 覆盖并登记（卸载时将清理它）。"""
         _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-user-own")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-user-own")
         monkeypatch.setattr(cli.subprocess, "run", _ok_run)
         monkeypatch.setattr(cli.os, "environ", dict(os.environ))
 
         # 存储选 2 后遇到覆盖确认，答 y
         _run_config(monkeypatch, ["5", "1", "2", "y", "0"], keys=[_PLACEHOLDER_UPDATED])
 
-        assert config.registered_env_vars() == ["DEEPSEEK_API_KEY"]
-        assert os.environ["DEEPSEEK_API_KEY"] == _PLACEHOLDER_UPDATED
+        assert config.registered_env_vars() == ["CRA_DEEPSEEK_API_KEY"]
+        assert os.environ["CRA_DEEPSEEK_API_KEY"] == _PLACEHOLDER_UPDATED
         assert "api_key" not in config.load_raw()["providers"][0]
 
     def test_foreign_var_declined_falls_back_to_plaintext(
@@ -511,7 +512,7 @@ class TestEnvVarOverwriteGuard:
         """同名变量非本程序所设：拒绝覆盖 → key 回退明文、原变量值不动、不登记。"""
         original = {"providers": [_entry_with_key("deepseek", ["m1"])]}
         _write_models(home_dir, original)
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-user-own")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-user-own")
         monkeypatch.setattr(cli.subprocess, "run", _ok_run)
         monkeypatch.setattr(cli.os, "environ", dict(os.environ))
 
@@ -519,7 +520,7 @@ class TestEnvVarOverwriteGuard:
 
         entry = config.load_raw()["providers"][0]
         assert entry["api_key"] == _PLACEHOLDER_UPDATED  # 回退明文，key 不丢
-        assert os.environ["DEEPSEEK_API_KEY"] == "placeholder-user-own"  # 用户原值未动
+        assert os.environ["CRA_DEEPSEEK_API_KEY"] == "placeholder-user-own"  # 用户原值未动
         assert config.registered_env_vars() == []  # 未登记 → 卸载不会碰它
 
     def test_owned_var_overwrites_without_asking(
@@ -527,15 +528,15 @@ class TestEnvVarOverwriteGuard:
     ) -> None:
         """变量已是本程序登记在案的：更新 key 不再询问（避免每次改 key 都被打断）。"""
         _write_models(home_dir, {"providers": [_entry_with_key("deepseek", ["m1"])]})
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-previous")
-        config.register_env_var("DEEPSEEK_API_KEY")  # 之前由本程序设置
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-previous")
+        config.register_env_var("CRA_DEEPSEEK_API_KEY")  # 之前由本程序设置
         monkeypatch.setattr(cli.subprocess, "run", _ok_run)
         monkeypatch.setattr(cli.os, "environ", dict(os.environ))
 
         _run_config(monkeypatch, ["5", "1", "2", "0"], keys=[_PLACEHOLDER_UPDATED])
 
-        assert os.environ["DEEPSEEK_API_KEY"] == _PLACEHOLDER_UPDATED  # 直接覆盖
-        assert config.registered_env_vars() == ["DEEPSEEK_API_KEY"]
+        assert os.environ["CRA_DEEPSEEK_API_KEY"] == _PLACEHOLDER_UPDATED  # 直接覆盖
+        assert config.registered_env_vars() == ["CRA_DEEPSEEK_API_KEY"]
 
     def test_interrupt_at_overwrite_prompt_falls_back_to_plaintext(
         self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
@@ -543,14 +544,14 @@ class TestEnvVarOverwriteGuard:
         """覆盖询问处中断（EOF/Ctrl+C）不是确认：回退明文、原变量不动。"""
         original = {"providers": [_entry_with_key("deepseek", ["m1"])]}
         _write_models(home_dir, original)
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-user-own")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-user-own")
         monkeypatch.setattr(cli.subprocess, "run", _ok_run)
         monkeypatch.setattr(cli.os, "environ", dict(os.environ))
 
         _run_config(monkeypatch, ["5", "1", "2"], keys=[_PLACEHOLDER_UPDATED])  # 询问处 EOF
 
         assert config.load_raw()["providers"][0]["api_key"] == _PLACEHOLDER_UPDATED
-        assert os.environ["DEEPSEEK_API_KEY"] == "placeholder-user-own"
+        assert os.environ["CRA_DEEPSEEK_API_KEY"] == "placeholder-user-own"
         assert config.registered_env_vars() == []
 
 
@@ -560,12 +561,12 @@ class TestConfigTestChain:
     def test_probe_uses_provider_env_var(
         self, monkeypatch: pytest.MonkeyPatch, home_dir: Path
     ) -> None:
-        """条目无 key 时探测回退 {PROVIDER}_API_KEY（不再只看 SE_CodeAgent）。"""
+        """条目无 key 时探测回退 CRA_供应商名大写_API_KEY（回退链第二级）。"""
         entry: dict[str, Any] = {
             "name": "myprov", "base_url": "https://x.example.com", "models": ["m"]
         }
         _write_models(home_dir, {"providers": [entry]})
-        monkeypatch.setenv("MYPROV_API_KEY", "placeholder-provider-env")
+        monkeypatch.setenv("CRA_MYPROV_API_KEY", "placeholder-provider-env")
         calls: list[dict[str, str]] = []
 
         def fake_probe(base_url: str, api_key: str, model_name: str) -> tuple[str, str]:

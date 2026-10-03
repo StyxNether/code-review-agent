@@ -56,7 +56,7 @@ class TestParser:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """M7 语义反转：缺失子命令原期望报错退出，现期望默认进入 REPL（mock input 验证）。"""
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         monkeypatch.setattr(sys, "argv", ["cra"])
         inputs = iter(["exit"])
@@ -106,7 +106,7 @@ class TestSetupGuide:
 
         out = capsys.readouterr().out
         assert "cra config" in out
-        assert "SE_CodeAgent" in out
+        assert "CRA_DEEPSEEK_API_KEY" in out
 
 
 class _FakeAgent:
@@ -173,6 +173,7 @@ class TestRunChat:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """无任何配置打印 cra config 引导后退出 2。"""
+        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("SE_CodeAgent", raising=False)
 
         with pytest.raises(SystemExit) as excinfo:
@@ -184,7 +185,7 @@ class TestRunChat:
     def test_exit_command_ends_repl(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         monkeypatch.setattr("builtins.input", lambda: "exit")
 
@@ -195,7 +196,7 @@ class TestRunChat:
     def test_eof_ends_repl_gracefully(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
 
         def raise_eof() -> str:
@@ -208,7 +209,7 @@ class TestRunChat:
         assert "再见" in capsys.readouterr().out
 
     def test_clear_resets_agent_and_continues(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         inputs = iter(["/clear", "exit"])
         monkeypatch.setattr("builtins.input", lambda: next(inputs))
@@ -221,7 +222,7 @@ class TestRunChat:
     def test_empty_input_continues_without_api_call(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         inputs = iter(["", "   ", "exit"])
         monkeypatch.setattr("builtins.input", lambda: next(inputs))
@@ -237,7 +238,7 @@ class TestRunChat:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """过程性叙述跟随工具轮实时暗色显示，不与最终回答堆叠。"""
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         inputs = iter(["审查 x.py", "exit"])
         monkeypatch.setattr("builtins.input", lambda: next(inputs))
@@ -314,7 +315,7 @@ def test_no_delta_answer_falls_back_to_return_value(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """兼容端点不返回文本增量时，界面用返回值兜底而非空白。"""
-    monkeypatch.setenv("SE_CodeAgent", "sk-test")
+    monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
     monkeypatch.setattr(cli, "Agent", _SilentAgent)
     inputs = iter(["问", "exit"])
     monkeypatch.setattr("builtins.input", lambda: next(inputs))
@@ -344,7 +345,7 @@ def test_partial_delta_not_duplicated_by_fallback(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """M6 兜底判据修复:增量已收到(尚在缓冲)时不得再用返回值重复渲染。"""
-    monkeypatch.setenv("SE_CodeAgent", "sk-test")
+    monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
     monkeypatch.setattr(cli, "Agent", _PartialDeltaAgent)
     inputs = iter(["问", "exit"])
     monkeypatch.setattr("builtins.input", lambda: next(inputs))
@@ -378,7 +379,7 @@ def test_narration_then_silent_final_falls_back(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """叙述已冲洗、最终消息无增量:返回值兜底渲染最终回答(界面不空白)。"""
-    monkeypatch.setenv("SE_CodeAgent", "sk-test")
+    monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
     monkeypatch.setattr(cli, "Agent", _NarrateOnlyAgent)
     inputs = iter(["问", "exit"])
     monkeypatch.setattr("builtins.input", lambda: next(inputs))
@@ -707,7 +708,7 @@ class TestReplCommands:
         capsys: pytest.CaptureFixture[str],
         inputs: list[str],
     ) -> str:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         iterator = iter(inputs)
         # 命令族内部有带提示语的 input("...") 调用,lambda 须接受可选位置参数
@@ -1027,7 +1028,7 @@ class TestExitAndSetting:
         capsys: pytest.CaptureFixture[str],
         inputs: list[str],
     ) -> str:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         monkeypatch.setattr("builtins.input", _feed(inputs))
         cli._run_chat()
@@ -1046,7 +1047,7 @@ class TestExitAndSetting:
     ) -> None:
         """菜单 1–6 逐项分发到既有命令函数（mock 记录映射），操作后回到菜单，0 返回对话。"""
         calls: list[Any] = []
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         monkeypatch.setattr(cli, "_cmd_change_model", lambda state: calls.append("model"))
         monkeypatch.setattr(
@@ -1096,7 +1097,7 @@ class TestExitAndSetting:
         patch _config_interactive_session 抛 ConfigError——启动阶段的 load_raw
         不受影响，模拟"REPL 打开后配置才损坏"的真实场景。
         """
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
 
         def broken(_console: Any, _data: dict[str, Any]) -> None:
@@ -1175,7 +1176,7 @@ class TestExitAndSetting:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """菜单内 EOF 经 _ask 归一为返回对话，REPL 主循环随后同样 EOF 优雅退出。"""
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         monkeypatch.setattr("builtins.input", _feed(["/setting"]))
 
@@ -1200,7 +1201,7 @@ class TestSessionAutosave:
         inputs: list[str],
         agent_cls: Any = _FakeAgent,
     ) -> str:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", agent_cls)
         monkeypatch.setattr("builtins.input", _feed(inputs))
         cli._run_chat()
@@ -1357,6 +1358,7 @@ class TestFirstRunSetup:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """明确拒绝：维持既有指引 + 退出码 2（拒绝后仍无配置）。"""
+        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("SE_CodeAgent", raising=False)
         monkeypatch.setattr("builtins.input", _feed(["n"]))
 
@@ -1376,8 +1378,10 @@ class TestFirstRunSetup:
     ) -> None:
         """DoD 演示路径：Y → DeepSeek 预设 → 回车 base_url → 回车预填 → key →
         环境变量存储 → 自动设默认 → 进入 REPL。"""
+        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("SE_CodeAgent", raising=False)
-        # 真实环境若已有 DEEPSEEK_API_KEY 会触发覆盖确认、使输入序列错位
+        # 真实环境若已有该变量会触发覆盖确认、使输入序列错位
+        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         run_calls: list[list[str]] = []
 
@@ -1406,8 +1410,8 @@ class TestFirstRunSetup:
         entry = data["providers"][0]
         assert entry["name"] == "DeepSeek"
         assert "api_key" not in entry  # 环境变量存储：models.json 不落明文
-        assert run_calls[0][:2] == ["setx", "DEEPSEEK_API_KEY"]
-        assert os.environ.get("DEEPSEEK_API_KEY") == "placeholder-wizard-key"
+        assert run_calls[0][:2] == ["setx", "CRA_DEEPSEEK_API_KEY"]
+        assert os.environ.get("CRA_DEEPSEEK_API_KEY") == "placeholder-wizard-key"
 
 
 class TestDeleteSession:
@@ -1419,7 +1423,7 @@ class TestDeleteSession:
         capsys: pytest.CaptureFixture[str],
         inputs: list[str],
     ) -> str:
-        monkeypatch.setenv("SE_CodeAgent", "sk-test")
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
         monkeypatch.setattr(cli, "Agent", _FakeAgent)
         monkeypatch.setattr("builtins.input", _feed(inputs))
         cli._run_chat()
