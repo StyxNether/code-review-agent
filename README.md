@@ -43,8 +43,8 @@ uv sync
 
 # 2. 配置（二选一）
 uv run cra config          # 方式 A：交互式配置（推荐，支持多供应商）
-setx SE_CodeAgent "sk-你的key"   # 方式 B：环境变量（Windows；setx 后需新开终端生效）
-                                 # macOS/Linux：export SE_CodeAgent="sk-你的key"
+setx CRA_DEEPSEEK_API_KEY "你的key"   # 方式 B：环境变量（Windows；setx 后需新开终端生效）
+                                      # macOS/Linux：export CRA_DEEPSEEK_API_KEY="你的key"
 
 # 3. 启动（`cra` 省略子命令默认进入对话，等价于 `uv run cra chat`）
 uv run cra
@@ -65,7 +65,7 @@ uv run cra config test   # 连通性自检：对每个供应商发一次 max_tok
 
 **供应商预设**：添加供应商时提供编号选择——1 自定义 + 8 家预设（DeepSeek、Kimi (Moonshot)、OpenAI、阿里云百炼、Z.ai Coding Plan / Z.ai API、BigModel Coding Plan / BigModel API）。选预设自动填入官方 base_url 与模型清单，**预填项均可修改**（base_url 回车用官方接入点或输入自定义；模型清单可答 n 自行输入）。
 
-**key 存储选择**：填入 key 后可选——1) 明文写入 models.json（注意文件权限与备份）；2) 环境变量（预设供应商用官方惯用名如 `DEEPSEEK_API_KEY`，自定义按"供应商名大写、空格与非字母数字转 `_`、`_API_KEY` 后缀"生成）。**若该变量已存在且不是本程序设置的**（例如您此前已配置过），会先询问是否覆盖（默认不覆盖，拒绝则 key 改存明文、原值不动）；本程序此前设置过的变量（登记在案）直接更新、不再重复询问。本程序写入的变量会登记到 `~/.cra/env-vars.json`，供卸载时精确清理。Windows 经 `setx` 自动写入并即时生效（key 不回显）；macOS/Linux 打印 `export` 指令由用户执行。选环境变量时 models.json 不落明文，已有明文一并移除。
+**key 存储选择**：填入 key 后可选——1) 明文写入 models.json（注意文件权限与备份）；2) 环境变量（变量名统一为 `CRA_供应商名大写_API_KEY`，如 DeepSeek → `CRA_DEEPSEEK_API_KEY`，自定义供应商按"供应商名大写、空格与非字母数字转 `_`"生成）。**若该变量已存在且不是本程序设置的**（例如您此前已配置过），会先询问是否覆盖（默认不覆盖，拒绝则 key 改存明文、原值不动）；本程序此前设置过的变量（登记在案）直接更新、不再重复询问。本程序写入的变量会登记到 `~/.cra/env-vars.json`，供卸载时精确清理。Windows 经 `setx` 自动写入并即时生效（key 不回显）；macOS/Linux 打印 `export` 指令由用户执行。选环境变量时 models.json 不落明文，已有明文一并移除。
 
 配置文件格式（`default` 以第一个 `/` 分隔"供应商/模型"）：
 
@@ -84,19 +84,20 @@ uv run cra config test   # 连通性自检：对每个供应商发一次 max_tok
 
 **⚠ 文件权限与备份注意事项**：选择明文存储时该文件以**明文**保存 API key，属本机敏感数据。请保持仅本人可读（POSIX 下写入时自动收紧为 0600；Windows 下请勿放在共享目录），备份时同样注意保密——勿上传到仓库、网盘或聊天工具。
 
-解析优先级：`--model/--provider` 参数 > 配置文件 `default` > 环境变量。供应商条目缺 `api_key` 时按序回退环境变量：`{供应商}_API_KEY`（预设供应商用官方惯用名）→ `SE_CodeAgent`（key 是否有效由认证环节暴露）。
+解析优先级：`--model/--provider` 参数 > 配置文件 `default` > 环境变量。供应商条目缺 `api_key` 时按序回退环境变量：`CRA_供应商名大写_API_KEY`（如 DeepSeek 为 `CRA_DEEPSEEK_API_KEY`）→ `SE_CodeAgent`（历史变量，最后回退；key 是否有效由认证环节暴露）。
 
 ### 环境变量（models.json 缺省时的回退）
 
 | 环境变量 | 必填 | 默认 | 说明 |
 |----------|------|------|------|
-| `SE_CodeAgent` | 配置文件缺省时必填 | — | API key（仅启动校验非空） |
+| `CRA_DEEPSEEK_API_KEY` | 配置文件缺省时必填 | — | 默认供应商（DeepSeek）的 API key（仅启动校验非空） |
+| `SE_CodeAgent` | 否（历史变量） | — | 旧版 key 变量名，仍作最后回退 |
 | `CRA_MODEL` | 否 | `deepseek-flash` | 模型名（OpenAI 兼容接口均可） |
 | `CRA_BASE_URL` | 否 | `https://api.deepseek.com` | OpenAI 兼容接入点 |
 | `CRA_EXEC_TIMEOUT` | 否 | `10` | 代码执行超时（秒，1~60） |
 | `CRA_MAX_CONTEXT_TOKENS` | 否 | `100000` | 上下文截断阈值（tokens） |
 
-供应商 key 亦可存入各自的官方惯用变量（如 `DEEPSEEK_API_KEY`、`MOONSHOT_API_KEY`、`OPENAI_API_KEY`、`DASHSCOPE_API_KEY`、`ZAI_API_KEY`、`ZHIPUAI_API_KEY`）——`cra config` 选环境变量存储时自动生成；回退顺序见上文"解析优先级"。
+各供应商 key 的环境变量名统一为 `CRA_供应商名大写_API_KEY`（如 `CRA_DEEPSEEK_API_KEY`、`CRA_MOONSHOT_API_KEY`、`CRA_OPENAI_API_KEY`、`CRA_DASHSCOPE_API_KEY`、`CRA_ZAI_API_KEY`、`CRA_ZHIPUAI_API_KEY`）——`cra config` 选环境变量存储时自动生成；回退顺序见上文"解析优先级"。
 
 ## 使用示例
 
@@ -180,7 +181,7 @@ cra uninstall
 
 1. **清单确认**：列出将删除内容（uv 工具 `code-review-agent` 与 cra 垫片、PATH 条目、用户数据、本程序设置的环境变量清单），回车或 `n` 取消、不删除任何内容；
 2. **用户数据**：删除 `~/.cra/`（models.json 含 API key、sessions/ 会话存档、环境变量登记文件），答 `n` 保留；
-3. **环境变量**：仅清理 `~/.cra/env-vars.json` 中**登记在案**的变量（本程序 `setx` 写入过的），逐个列出明示——您已有的其它变量（含作业检查前就存在的 `DEEPSEEK_API_KEY`）绝不触碰；待删清单在删除 `~/.cra/` **之前**已读出（登记文件就在其中）；Windows 经 PowerShell 从用户环境移除（新开终端立即可见），macOS/Linux 打印待删的 export 行（不自动改 rc）；登记文件损坏时保守跳过；
+3. **环境变量**：仅清理 `~/.cra/env-vars.json` 中**登记在案**的变量（本程序 `setx` 写入过的），逐个列出明示——您已有的其它变量（含作业检查前就存在的 `CRA_DEEPSEEK_API_KEY`）绝不触碰；待删清单在删除 `~/.cra/` **之前**已读出（登记文件就在其中）；Windows 经 PowerShell 从用户环境移除（新开终端立即可见），macOS/Linux 打印待删的 export 行（不自动改 rc）；登记文件损坏时保守跳过；
 4. **后台清理**：生成等待本进程退出后执行 `uv tool uninstall` 的分离后台任务（运行中的解释器文件被锁，须父进程退出后才能删净），完成后若已无其他 uv 工具，再从用户 PATH 移除 `~/.local/bin` 条目（Windows 自动；macOS/Linux 打印待删的 shell 配置行指令、不自动改 rc）；
 5. 打印"程序将在退出后完成卸载"后正常退出。
 

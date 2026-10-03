@@ -15,3 +15,6 @@ docs/PROGRESS.md
 
 # 课程课件（是否入库待用户决定，先避免误提交）
 Homework 1.pptx
+
+# Office 等应用的锁文件（打开文档时产生，纯临时文件）
+~$*
