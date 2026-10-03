@@ -35,9 +35,13 @@ class _FakeReviewAgent:
     reply = "审查结论文本。"
     raised: Exception | None = None
     prompts: ClassVar[list[str]] = []
+    resets: ClassVar[int] = 0
 
     def __init__(self, *, resolved: Any = None, max_tool_rounds: int = 10, **_kwargs: Any) -> None:
         assert resolved is not None, "review 路径必须携带解析结果"
+
+    def reset(self) -> None:
+        _FakeReviewAgent.resets += 1
 
     def run(self, prompt: str, **_kwargs: Any) -> str:
         _FakeReviewAgent.prompts.append(prompt)
@@ -50,6 +54,7 @@ def _patch_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeReviewAgent.reply = "审查结论文本。"
     _FakeReviewAgent.prompts = []
     _FakeReviewAgent.raised = None
+    _FakeReviewAgent.resets = 0
     monkeypatch.setattr(cli, "Agent", _FakeReviewAgent)
 
 
@@ -391,6 +396,36 @@ class TestRunReviewExitCodes:
         text = report.read_text(encoding="utf-8")
         assert "【一般】" in text
         assert "不确定" in text
+
+    def test_batch_review_resets_context_per_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """批量审查逐文件重置上下文：各文件独立评审，token 不随文件数累积。"""
+        _patch_agent(monkeypatch)
+        paths = []
+        for name in ("a.py", "b.py", "c.py"):
+            target = tmp_path / name
+            target.write_text("x = 1", encoding="utf-8")
+            paths.append(str(target))
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._run_review(_review_args(paths))
+
+        assert excinfo.value.code == 0
+        assert _FakeReviewAgent.resets == 3
+
+    def test_oversized_file_exits_2(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """超过单文件读取上限（10 MB，与 read_file 同口径）按运行错误退出 2。"""
+        _patch_agent(monkeypatch)
+        target = tmp_path / "big.py"
+        target.write_bytes(b"\n" * (10 * 1024 * 1024 + 1))
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._run_review(_review_args([str(target)]))
+
+        assert excinfo.value.code == 2
 
     def test_prompt_carries_file_content(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

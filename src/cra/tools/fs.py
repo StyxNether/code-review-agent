@@ -7,9 +7,23 @@
 from pathlib import Path
 
 MAX_READ_LINES = 400  # 单次读取上限，超出提示模型用 start/end 分段
+MAX_READ_BYTES = 10 * 1024 * 1024  # 单文件读取上限：读取本身须有界（先判大小再读，防大文件进内存）
 
 # list_dir 忽略这些目录与所有点开头的隐藏目录
 IGNORED_DIRS = {".venv", "__pycache__", ".git", ".pytest_cache", ".ruff_cache"}
+
+
+def split_lines(text: str) -> list[str]:
+    """按真实换行符（\r\n、\r、\n）切分行；尾部换行不产生空尾行（与 splitlines 一致）。
+
+    不用 str.splitlines()：它把 \\x0c（form feed）、U+2028 等 Unicode 换行类
+    字符也当行界，而行号口径（编辑器、审查 location）只认真实换行——含这些
+    字符的文件会让 read_file 与审查 prompt 的行号整体漂移。
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def _resolve(path: str) -> Path:
@@ -74,6 +88,17 @@ def read_file(path: str, start: int | None = None, end: int | None = None) -> st
         return f"错误：路径不是文件：{target}（列目录请用 list_dir）"
 
     try:
+        # 先判大小再读：上限必须在读取之前生效，否则大文件已整文件进内存
+        size = target.stat().st_size
+    except OSError as exc:
+        return f"错误：无法读取文件 {target}：{exc}"
+    if size > MAX_READ_BYTES:
+        return (
+            f"错误：{target.name} 约 {size / 1048576:.1f} MB，超过单次读取上限"
+            f"（{MAX_READ_BYTES // 1048576} MB）。请让用户指定要审查的具体分段，"
+            "或改用 run_python 等方式提取所需内容。"
+        )
+    try:
         raw = target.read_bytes()
     except OSError as exc:
         return f"错误：无法读取文件 {target}：{exc}"
@@ -84,7 +109,7 @@ def read_file(path: str, start: int | None = None, end: int | None = None) -> st
         )
 
     text = raw.decode("utf-8", errors="replace")
-    lines = text.splitlines()
+    lines = split_lines(text)
     total = len(lines)
     if total == 0:
         # 空文件没有行区间可言，按区间规则会误报"start 不能大于 end"

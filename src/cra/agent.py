@@ -264,20 +264,18 @@ class _MaxToolRoundsMiddleware(AgentMiddleware):
         if _rounds_this_run(request.state.get("messages", [])) < self.max_rounds:
             return handler(request)
         directive = _forced_conclusion_directive(self.max_rounds)
-        if request.system_message is not None:
-            request = request.override(
-                tools=[],
-                tool_choice=None,
-                system_message=SystemMessage(
-                    content=f"{request.system_message.content}\n\n{directive}"
-                ),
-            )
-        else:
-            request = request.override(
-                tools=[],
-                tool_choice=None,
-                messages=[*request.messages, HumanMessage(content=directive)],
-            )
+        # 图构建恒传 system_prompt（_build_graph），system_message 必然存在；
+        # 显式失效而非伪造 user 消息兜底——伪造 user 会构成截断的轮次边界，
+        # 极端场景下截断会保留孤立指令、丢弃全部真实上下文
+        if request.system_message is None:
+            raise RuntimeError("模型请求缺少系统提示词：达限收尾指令无法经 system 通道注入")
+        request = request.override(
+            tools=[],
+            tool_choice=None,
+            system_message=SystemMessage(
+                content=f"{request.system_message.content}\n\n{directive}"
+            ),
+        )
         return handler(request)
 
 

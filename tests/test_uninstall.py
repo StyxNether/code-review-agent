@@ -1,4 +1,4 @@
-"""cra uninstall：两道确认分支、数据删除、分离任务命令拼装与 PATH 判定。
+"""cra uninstall：多道确认分支（环境变量一问仅在存在登记时出现）、数据删除、分离任务命令拼装与 PATH 判定。
 
 subprocess 一律 mock——绝不真实执行 uv/卸载/PATH 修改；用户目录经 home_dir 隔离。
 """
@@ -60,7 +60,7 @@ def _seed_user_data(home_dir: Path) -> Path:
 
 
 class TestUninstallConfirmation:
-    """两道交互确认：清单确认默认 N 防误触发；用户数据默认 Y（删干净）。"""
+    """多道交互确认：清单确认默认 N 防误触发；用户数据默认 Y（删干净）。"""
 
     def test_first_confirm_decline_is_noop(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], home_dir: Path

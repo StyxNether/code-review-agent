@@ -107,6 +107,15 @@ class TestArgValidation:
         assert "不是 Python 文件" in result
         assert "read_file" in result  # 给模型可操作的下一步
 
+    def test_uppercase_py_suffix_accepted(self, tmp_path: Path) -> None:
+        """Windows 文件系统大小写不敏感：UPPER.PY 也是 Python 文件。"""
+        target = tmp_path / "SCRIPT.PY"
+        target.write_text("print('ok-upper')", encoding="utf-8")
+
+        result = exec_py.run_python(path=str(target), timeout=10)
+
+        assert "ok-upper" in result
+
 
 class TestTimeout:
     def test_timeout_param_kills_and_raises(self) -> None:
@@ -153,8 +162,11 @@ class TestEnvSanitization:
         assert exec_py._is_credential_var("SE_CODEAGENT")
         assert exec_py._is_credential_var("OPENAI_API_KEY")
         assert exec_py._is_credential_var("my_api_key")  # 大小写不敏感的超集过滤
+        assert exec_py._is_credential_var("MY-API-KEY")  # 连字符归一为下划线后命中
+        assert exec_py._is_credential_var("apikey")  # 无分隔命名同样命中
         assert not exec_py._is_credential_var("PATH")
         assert not exec_py._is_credential_var("CRA_EXEC_TIMEOUT")
+        assert not exec_py._is_credential_var("MONKEY_BUSINESS")  # 仅含 KEY 不误伤
 
         env = {**exec_py._sanitized_env()}
         assert "SE_CODEAGENT" not in {name.upper() for name in env}

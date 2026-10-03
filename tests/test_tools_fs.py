@@ -213,3 +213,40 @@ class TestReadFile:
     def test_directory_path_structured_error(self, tmp_path: Path) -> None:
         (tmp_path / "pkg").mkdir()
         assert fs.read_file(str(tmp_path / "pkg")).startswith("错误")
+
+    def test_oversized_file_structured_error(self, tmp_path: Path) -> None:
+        """超过单文件读取上限（10 MB）返回结构化错误，不整文件进内存。"""
+        target = tmp_path / "big.py"
+        target.write_bytes(b"\n" * (10 * 1024 * 1024 + 1))
+
+        out = fs.read_file(str(target))
+
+        assert out.startswith("错误：")
+        assert "10 MB" in out
+
+
+class TestSplitLines:
+    def test_only_real_newlines_split(self) -> None:
+        assert fs.split_lines("a\nb") == ["a", "b"]
+        assert fs.split_lines("a\r\nb") == ["a", "b"]
+        assert fs.split_lines("a\rb") == ["a", "b"]
+        assert fs.split_lines("") == []
+        assert fs.split_lines("a\n") == ["a"]
+        assert fs.split_lines("a\n\n") == ["a", ""]
+
+    def test_unicode_line_separators_do_not_split(self) -> None:
+        """\x0c（form feed）与 U+2028 不是行界：splitlines 会错误断行。"""
+        assert fs.split_lines("a\x0cb") == ["a\x0cb"]
+        assert fs.split_lines("ab") == ["ab"]
+
+    def test_read_file_line_numbers_ignore_form_feed(self, tmp_path: Path) -> None:
+        """含 form feed 的文件行号与编辑器口径一致（splitlines 会整体漂移）。"""
+        target = tmp_path / "ff.py"
+        target.write_text("first\n\x0cmid\nlast\n", encoding="utf-8")
+
+        out = fs.read_file(str(target))
+
+        assert "   1 | first" in out
+        assert "   2 | \x0cmid" in out
+        assert "   3 | last" in out
+        assert "共 3 行" in out

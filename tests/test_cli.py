@@ -1,6 +1,7 @@
 """cli 单元：参数解析、分级标记着色渲染与围栏状态机、REPL 循环与设置指引
 （不产生真实终端输出，无网络）。"""
 
+import io
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from rich.console import Console
 from cra import cli, config, sessions
 from cra.cli import (
     _build_parser,
-    _in_fence,
+    _fence_toggle,
     _marker_style,
     _print_config_guide,
     _setup_hint,
@@ -466,11 +467,14 @@ def test_fence_after_blank_line_in_single_feed() -> None:
     assert "print('hi')" in out
 
 
-def test_in_fence_state() -> None:
-    assert not _in_fence("a\n\nb")
-    assert _in_fence("```py\nx")
-    assert not _in_fence("```py\nx\n```")
-    assert _in_fence("~~~\nx\n```")  # 字符不同的围栏不互相闭合
+def test_fence_toggle_state() -> None:
+    assert _fence_toggle("a", None) is None
+    state = _fence_toggle("```py", None)
+    assert state == ("`", 3)
+    assert _fence_toggle("x", state) == state  # 围栏内普通行不改变状态
+    assert _fence_toggle("```", state) is None  # 同字符闭围栏
+    state2 = _fence_toggle("~~~", None)
+    assert _fence_toggle("```", state2) == state2  # 字符不同的围栏不互相闭合
 
 
 # ---- 行级单元流式、句级早发、暂扣分类与分层样式 ----
@@ -1474,3 +1478,88 @@ class TestDeleteSession:
         out = self._repl(monkeypatch, capsys, ["/delete", "exit"])
 
         assert "没有可删除的会话" in out
+
+
+# ---- 交付前终审轮回归：输入健壮性、命令容错、输出编码与状态一致性 ----
+
+
+class TestReplInputRobustness:
+    """stdin 不可用与命令容错：输入路径异常一律干净退出/取消，不 traceback。"""
+
+    def _run(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], input_stub: Any
+    ) -> str:
+        monkeypatch.setenv("CRA_DEEPSEEK_API_KEY", "placeholder-key")
+        monkeypatch.setattr(cli, "Agent", _FakeAgent)
+        monkeypatch.setattr("builtins.input", input_stub)
+        cli._run_chat()
+        return capsys.readouterr().out
+
+    def test_closed_stdin_runtime_error_ends_repl(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """stdin 被整体关闭（fd 0<&-、无 stdin 启动）时 CPython 抛 RuntimeError：与 EOF 同义退出。"""
+
+        def raise_lost_stdin() -> str:
+            raise RuntimeError("lost sys.stdin")
+
+        out = self._run(monkeypatch, capsys, raise_lost_stdin)
+
+        assert "再见" in out
+
+    def test_exit_with_trailing_argument_exits(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """/exit 带参数按命令意图退出，不作为普通文本发给模型。"""
+        out = self._run(monkeypatch, capsys, _feed(["/exit now"]))
+
+        assert "再见" in out
+        assert _FakeAgent.last is not None
+        assert _FakeAgent.last.turns == []  # 模型未收到任何消息
+
+    def test_change_model_uppercase_argument_routed(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """/CHANGE MODEL 参数大小写不敏感：走切换流程而非打印用法提示。"""
+        out = self._run(monkeypatch, capsys, _feed(["/CHANGE MODEL", "exit"]))
+
+        assert "用法：" not in out
+
+
+class TestLoadClearsLastRoundState:
+    def test_load_replaces_last_answer_and_process(self, home_dir: Path) -> None:
+        """加载会话整体替换后，"最近一轮结论/过程"一并失效（存档不含它们）。"""
+        state = cli._ReplState(
+            agent=_FakeAgent(),
+            console=Console(file=io.StringIO()),
+            no_stream=True,
+            confirm_flag={"on": False},
+            last_answer="加载前的旧结论",
+            last_process=[("n", "旧过程")],
+        )
+        cli.sessions.save_session(cli.sessions.session_path("t1"), [])
+
+        cli._cmd_load(state, "t1")
+
+        assert state.last_answer is None
+        assert state.last_process == []
+
+
+class TestForceUtf8Stdio:
+    def test_reconfigures_text_wrapper_streams(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        out = io.TextIOWrapper(io.BytesIO(), encoding="cp936")
+        err = io.TextIOWrapper(io.BytesIO(), encoding="cp936")
+        monkeypatch.setattr(cli.sys, "stdout", out)
+        monkeypatch.setattr(cli.sys, "stderr", err)
+
+        cli._force_utf8_stdio()
+
+        assert out.encoding == "utf-8"
+        assert err.encoding == "utf-8"
+
+    def test_non_wrapper_streams_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = io.StringIO()
+        monkeypatch.setattr(cli.sys, "stdout", fake)
+        monkeypatch.setattr(cli.sys, "stderr", fake)
+
+        cli._force_utf8_stdio()  # 不抛异常即通过（测试桩等非常规流直接跳过）

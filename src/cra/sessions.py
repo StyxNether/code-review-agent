@@ -37,10 +37,19 @@ def session_path(name: str) -> Path:
 
 
 def save_session(path: Path, data: list[dict[str, Any]]) -> None:
-    """把消息数组写入会话文件（目录不存在则创建）；原子替换，防写一半损坏。"""
+    """把消息数组写入会话文件（目录不存在则创建）；原子替换，防写一半损坏。
+
+    POSIX 上尽力收紧为 0600：会话内容可能内嵌被审查的源码，敏感度与配置文件
+    相当；失败不阻塞保存（与 config.save_raw 的权限处理同口径）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    if os.name == "posix":
+        try:
+            tmp.chmod(0o600)
+        except OSError:
+            pass  # 权限收紧失败不阻塞保存
     os.replace(tmp, path)
 
 

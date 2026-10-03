@@ -34,11 +34,13 @@ def _is_credential_var(name: str) -> bool:
     """环境变量名是否属凭证类（独立成函数便于测试与扩展名单）。
 
     大小写不敏感比对：Windows 环境变量名不区分大小写（同名全大写变体确实
-    存在，精确匹配过滤会漏）；POSIX 侧为大小写敏感，
-    不敏感过滤只会多剔除无关变量，属安全方向的超集。名称黑名单无法覆盖
-    "名字无害、值是凭证"的变量——这是本控制的已知边界。
+    存在，精确匹配过滤会漏）；连字符先归一为下划线（Windows 变量名合法字符，
+    归一后覆盖 MY-API-KEY 型命名）；POSIX 侧为大小写敏感，不敏感过滤只会多
+    剔除无关变量，属安全方向的超集。名称黑名单无法覆盖"名字无害、值是凭证"
+    的变量——这是本控制的已知边界。
     """
-    return name.upper() == "SE_CODEAGENT" or "API_KEY" in name.upper()
+    normalized = name.upper().replace("-", "_")
+    return normalized == "SE_CODEAGENT" or "API_KEY" in normalized or "APIKEY" in normalized
 
 
 def _sanitized_env() -> dict[str, str]:
@@ -74,7 +76,8 @@ def run_python(
             return f"错误：文件不存在：{target}"
         if not target.is_file():
             return f"错误：路径不是文件：{target}（列目录请用 list_dir）"
-        if target.suffix != _PYTHON_SUFFIX:
+        # Windows 文件系统大小写不敏感：UPPER.PY 也是 Python 文件
+        if target.suffix.lower() != _PYTHON_SUFFIX:
             return (
                 f"错误：{target.name} 不是 Python 文件（仅支持 .py），无法执行。"
                 "如需查看其内容请改用 read_file。"

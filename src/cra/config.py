@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -125,7 +126,7 @@ def env_registry_path() -> Path:
     """本程序写入的环境变量登记文件（~/.cra/env-vars.json）。
 
     卸载时据此区分"程序自己设置的变量"与"用户已有的同名变量"——只清前者，
-    绝不触碰后者（用户在检查作业之前可能就有 CRA_DEEPSEEK_API_KEY 等变量）。
+    绝不触碰后者（使用者在此之前可能已自行设置 CRA_DEEPSEEK_API_KEY 等变量）。
     """
     return config_path().parent / "env-vars.json"
 
@@ -329,6 +330,38 @@ def validate_config(data: Any) -> None:
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ConfigError(f"配置文件结构无效：供应商名重复：{', '.join(duplicates)}。")
+    collisions = conflicting_keyless_env_vars(providers)
+    if collisions:
+        detail = "；".join(f"{var} ← {', '.join(names)}" for var, names in sorted(collisions.items()))
+        raise ConfigError(
+            "配置文件结构无效：以下供应商未设置 api_key，且回退到同一个 key 环境变量"
+            f"（接入点主机不同，会互相读到对方的凭据）：{detail}。"
+            "请为其中一方设置 api_key，或修改供应商名使变量名可区分。"
+        )
+
+
+def conflicting_keyless_env_vars(providers: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """未设 api_key 的供应商中，回退环境变量名相同但接入点主机不同的分组。
+
+    环境变量名归一化是有损映射（"DeepSeek" 与 "deepseek" 同名），两个都依赖
+    环境变量回退的供应商撞名时，会把同一凭据发往不同接入点（key 串用）。同
+    一主机（同一供应商的多端点，如 Z.ai/BigModel 的 Coding Plan 与 API 双预设
+    共用官方变量名）属设计内共享，不算冲突。供应商名 → 变量名的映射经
+    provider_env_var（预设名取官方变量名，自定义按归一化规则）。回退链末端
+    共享的 SE_CodeAgent（历史变量）是有意保留的最后回退，不属于本函数的冲突
+    判定范围——多个无 key 供应商在各自专属变量缺失时共同回退到它是设计行为。
+    """
+    by_var: dict[str, list[tuple[str, str]]] = {}
+    for entry in providers:
+        if entry.get("api_key"):
+            continue
+        host = urlsplit(entry.get("base_url", "")).hostname or ""
+        by_var.setdefault(provider_env_var(entry["name"]), []).append((entry["name"], host))
+    return {
+        var: [name for name, _ in entries]
+        for var, entries in by_var.items()
+        if len({host for _, host in entries}) > 1
+    }
 
 
 def _resolve_provider(

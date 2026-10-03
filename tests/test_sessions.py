@@ -57,3 +57,38 @@ class TestSaveLoad:
 
         with pytest.raises(json.JSONDecodeError):
             sessions.load_session(path)
+
+
+class TestSaveSessionPermissions:
+    def test_posix_tightens_to_0600(self, home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """POSIX 上存档尽力收紧 0600（内容可能内嵌被审查源码，敏感度与配置相当）。
+
+        路径在打桩 os.name 之前构造——Path() 派发依赖 os.name，打桩后再构造
+        会在 Windows 上实例化出 PosixPath。
+        """
+        target = sessions.session_path("perm")
+        calls: list[tuple[str, int]] = []
+        monkeypatch.setattr(sessions.os, "name", "posix")
+        monkeypatch.setattr(
+            sessions.os, "chmod", lambda p, mode, **_kw: calls.append((str(p), mode))
+        )
+
+        sessions.save_session(target, [{"type": "human", "data": {"content": "x"}}])
+
+        assert calls and calls[0][1] == 0o600
+        assert target.exists()
+
+    def test_chmod_failure_does_not_block_save(
+        self, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = sessions.session_path("permfail")
+
+        def deny(_p: object, _m: object, **_kw: object) -> None:
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(sessions.os, "name", "posix")
+        monkeypatch.setattr(sessions.os, "chmod", deny)
+
+        sessions.save_session(target, [])  # 不抛即通过：权限收紧失败不阻塞保存
+
+        assert target.exists()

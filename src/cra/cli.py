@@ -1,12 +1,14 @@
-"""cra 命令行入口：argparse（chat/review/config）+ REPL + rich 流式彩色渲染。
+"""cra 命令行入口：argparse（chat/review/config/uninstall）+ REPL + rich 流式彩色渲染。
 
 cli 只管交互与渲染：LLM 循环与工具执行一律经 Agent；从 llm 导入的只有
 LLMError 类型与 config test 专用的 probe 探测（无 Agent 循环的最小通路）、
-从 tools 导入的只有 ERROR_PREFIX 常量，不直接执行工具。
+从 tools 导入的只有 ERROR_PREFIX 常量与 split_lines 行切分（审查 prompt 的
+行号口径与 read_file 保持一致），不直接执行工具。
 """
 
 import argparse
 import getpass
+import io
 import json
 import os
 import re
@@ -29,6 +31,7 @@ from cra import config, llm, sessions
 from cra.agent import MAX_TOOL_ROUNDS, Agent, ExecConfirmCallback
 from cra.llm import LLMError
 from cra.tools import ERROR_PREFIX
+from cra.tools.fs import MAX_READ_BYTES, split_lines
 
 _TOOL_ARGS_PREVIEW_LIMIT = 80
 # 分级标记的着色：严重红 / 一般黄 / 建议绿
@@ -100,14 +103,6 @@ def _fence_toggle(line: str, state: tuple[str, int] | None) -> tuple[str, int] |
     if marker[0] == state[0] and len(marker) >= state[1] and not line[match.end() :].strip():
         return None  # 闭围栏：同字符、长度不短于开头、行内无其他内容
     return state
-
-
-def _in_fence(text: str) -> bool:
-    """text（可为消息前缀）的最后一行之后是否仍处于围栏代码块内部。"""
-    state: tuple[str, int] | None = None
-    for line in text.split("\n"):
-        state = _fence_toggle(line, state)
-    return state is not None
 
 
 def _complete_lines(text: str) -> Iterator[tuple[int, str]]:
@@ -281,7 +276,6 @@ class _StreamingMarkdown:
     def __init__(self, console: Console) -> None:
         self._console = console
         self._buffer = ""
-        self._has_output = False
         self._pending_break = False
         self._provisional = True  # 分类窗口：一轮开始/工具结果后置位，第二单元到达解除
         self._held: list[tuple[str, bool]] = []  # 暂扣单元（文本, 落盘时是否前置空行）
@@ -339,7 +333,6 @@ class _StreamingMarkdown:
             return None
         text = "\n".join(parts)
         self._console.print(text, style="dim", markup=False, highlight=False)
-        self._has_output = True
         self._pending_break = True
         self._provisional = True
         self._delta_since_boundary = False
@@ -374,7 +367,6 @@ class _StreamingMarkdown:
             self._console.print()  # 段落/工具边界后留空行，避免文字堆叠
             self._pending_break = False
         self._render_lines(text)
-        self._has_output = True
 
     def _next_unit(self) -> str | None:
         """从缓冲取出下一个可安全落盘的单元；无可发内容返回 None。
@@ -838,6 +830,10 @@ def _cmd_load(state: _ReplState, name: str) -> None:
         console.print(f"会话加载失败：{exc}", markup=False)
         return
     console.print(f"会话已加载：{path}（共 {len(data)} 条消息，当前会话已被整体替换）", markup=False)
+    # "最近一轮结论/过程"随会话整体替换而失效：不清理会让 /export 导出加载
+    # 前的旧结论（存档只含消息数组，无从恢复旧会话的最近一轮）
+    state.last_answer = None
+    state.last_process = []
     _print_session_history(console, data)
 
 
@@ -1011,7 +1007,7 @@ def _handle_command(user_input: str, state: _ReplState) -> bool:
         state.agent.reset()
         state.console.print("[dim]上下文已清空（系统提示词保留）。[/]")
     elif command in ("/change", "/model"):
-        if command == "/change" and argument != "model":
+        if command == "/change" and argument.lower() != "model":
             state.console.print("用法：/change model（别名 /model）。", markup=False)
         else:
             _cmd_change_model(state)
@@ -1130,12 +1126,17 @@ def _repl_loop(state: _ReplState) -> None:
             # 提示符着色便于在流式输出中定位输入位置
             console.print("你> ", style="bold cyan", end="")
             user_input = input().strip()
-        except (EOFError, KeyboardInterrupt):
+        except (EOFError, KeyboardInterrupt, RuntimeError):
+            # RuntimeError：stdin 被整体关闭（fd 0<&-、无 stdin 的启动环境）时
+            # CPython 抛 "lost sys.stdin"，与 EOF 同义按正常退出处理（经 _ask
+            # 的输入路径已统一，这里是 REPL 唯一不经 _ask 的 input 调用点）
             console.print("\n再见。", markup=False, highlight=False)
             return
         if not user_input:
             continue  # 空输入/纯空白直接进入下一轮提示，不调 API
-        if user_input in ("exit", "/exit"):
+        # 裸 exit 精确匹配（它也可能是用户想说的普通词）；/exit 是命令，
+        # 前缀匹配——"/exit now" 属手滑多打参数，不发给模型
+        if user_input == "exit" or user_input.split(maxsplit=1)[0].lower() == "/exit":
             console.print("再见。")
             return
         if _handle_command(user_input, state):
@@ -1207,10 +1208,14 @@ def _print_providers(console: Console, data: dict[str, Any]) -> None:
 
 
 def _read_key(prompt: str) -> str:
-    """key 输入不回显（getpass），避免明文残留在终端回滚缓冲；中断/输入流不可用视为取消。"""
+    """key 输入不回显（getpass），避免明文残留在终端回滚缓冲；中断/输入流不可用视为取消。
+
+    异常集合与 _ask 对齐：RuntimeError 覆盖 stdin 被整体关闭的环境（getpass
+    回退读 stdin 时同样会触发 lost sys.stdin）。
+    """
     try:
         return getpass.getpass(prompt).strip()
-    except (EOFError, KeyboardInterrupt, OSError):
+    except (EOFError, KeyboardInterrupt, OSError, RuntimeError):
         return ""
 
 
@@ -1291,6 +1296,24 @@ def _apply_key_storage(session: _ConfigSession, entry: dict[str, Any], key: str)
         return
     if choice == "2":
         entry.pop("api_key", None)
+        # 写入前撞名检查：其他未设 api_key 的供应商若回退到同一变量名且接入点
+        # 主机不同，写入会把本 key 泄露给那些供应商的接入点（key 串用）
+        provider_name = entry["name"]
+        probe = {"name": provider_name, "base_url": entry.get("base_url", ""), "api_key": ""}
+        others = [item for item in session.providers() if item is not entry and not item.get("api_key")]
+        colliding = config.conflicting_keyless_env_vars([*others, probe])
+        if any(provider_name in names for names in colliding.values()):
+            console.print(
+                f"环境变量 {var} 同时是其他未设 key 供应商（接入点主机不同）的回退变量，"
+                "写入后它们会读到这个 key。",
+                style="yellow",
+                markup=False,
+            )
+            answer = _ask("仍写入该环境变量？（y/N，拒绝则 key 改存明文）")
+            if answer is None or answer.lower() not in ("y", "yes"):
+                entry["api_key"] = key
+                console.print("key 已改存 models.json（明文）。", style="yellow", markup=False)
+                return
         if not _write_env_var_key(console, var, key):
             entry["api_key"] = key
     else:
@@ -1417,6 +1440,19 @@ def _config_add_provider(session: _ConfigSession) -> None:
         _apply_key_storage(session, entry, key)
     else:
         entry["api_key"] = ""
+        # 留空即依赖环境变量回退：归一化变量名与已有无 key 供应商撞名且接入点
+        # 主机不同时，会互相读到对方的凭据（validate_config 同规则，写入时即暴露）
+        conflicts = config.conflicting_keyless_env_vars(providers)
+        if conflicts:
+            providers.remove(entry)
+            detail = "；".join(f"{var} ← {', '.join(names)}" for var, names in sorted(conflicts.items()))
+            console.print(
+                f"无法添加：该供应商将回退读取的环境变量名与已有供应商撞名（{detail}），"
+                "会把一家的凭据发往另一家的接入点。请修改供应商名，或为其设置 key。",
+                style="yellow",
+                markup=False,
+            )
+            return
     console.print(f"供应商 '{name}' 已添加。", markup=False)
     session.save()
 
@@ -1446,12 +1482,13 @@ def _ask(prompt: str) -> str | None:
     """交互输入统一封装：Ctrl+C/EOF/输入流不可用视为取消（返回 None），不终止会话。
 
     REPL 内所有直接 input() 的调用点都必须走本封装——管道输入耗尽或中断时
-    以 traceback 崩掉会话。OSError 覆盖 stdin 被捕获或
-    关闭的环境（如 pytest、无 stdin 的管道）：与 EOF 同义，按取消处理。
+    以 traceback 崩掉会话。OSError 覆盖 stdin 被捕获的环境（如 pytest、无
+    stdin 的管道）；stdin 被整体关闭（fd 0<&-）时 CPython 抛 RuntimeError
+    （lost sys.stdin），两者都与 EOF 同义，按取消处理。
     """
     try:
         return input(prompt).strip()
-    except (EOFError, KeyboardInterrupt, OSError):
+    except (EOFError, KeyboardInterrupt, OSError, RuntimeError):
         return None
 
 
@@ -1800,18 +1837,18 @@ def _delete_user_data(console: Console) -> None:
     确为 ".cra"（防 config 路径未来演化为可配置时误删他处）；Path.home() 在
     POSIX 缺 HOME 时抛 RuntimeError，与 OSError 一并兜底为可读提示。
     """
-    target = config.config_path().parent
-    if target.name != ".cra":
-        console.print(
-            f"数据目录 {target} 异常（预期为 ~/.cra），已取消删除以策安全。",
-            style="red",
-            markup=False,
-        )
-        return
-    if not target.exists():
-        console.print(f"未发现用户数据目录 {target}，跳过数据清理。", markup=False)
-        return
     try:
+        target = config.config_path().parent
+        if target.name != ".cra":
+            console.print(
+                f"数据目录 {target} 异常（预期为 ~/.cra），已取消删除以策安全。",
+                style="red",
+                markup=False,
+            )
+            return
+        if not target.exists():
+            console.print(f"未发现用户数据目录 {target}，跳过数据清理。", markup=False)
+            return
         shutil.rmtree(target)
     except (OSError, RuntimeError) as exc:
         console.print(f"用户数据删除失败：{exc}", style="red", markup=False)
@@ -1901,8 +1938,8 @@ def _run_uninstall() -> None:
     uninstall（运行中的 venv 解释器文件被锁），并按"卸载后无其他 uv 工具"
     决定是否移除用户 PATH 的 ~/.local/bin 条目（Windows 自动、POSIX 打印
     待删的 shell 配置行指令、不自动改 rc）；⑤ 打印退出提示后正常退出（退出
-    码 0）。项目文件夹（仓库克隆本身）不由本程序删除——老师删除克隆目录
-    即可；uv tool list 无本工具时跳过工具卸载并说明。
+    码 0）。项目文件夹（仓库克隆本身）不由本程序删除——由使用者自行删除克隆
+    目录即可；uv tool list 无本工具时跳过工具卸载并说明。
     """
     console = Console()
     # 登记清单必须在删除 ~/.cra/ 之前读出（它就在 ~/.cra/ 里），否则无从区分
@@ -2060,8 +2097,17 @@ def _collect_review_files(paths: list[str]) -> list[tuple[str, str]]:
 
 
 def _read_review_text(path: Path) -> str:
-    """读取待审查文件文本；读取失败抛 _ReviewFileError（退出码 2）。"""
+    """读取待审查文件文本；读取失败或超单文件大小上限抛 _ReviewFileError（退出码 2）。
+
+    上限与 read_file 同值同口径：两条读取入口（工具/审查 prompt）对"读取体量
+    有界"的保证必须一致，否则 cra review 大文件仍会整文件进内存。
+    """
     try:
+        if path.stat().st_size > MAX_READ_BYTES:
+            raise _ReviewFileError(
+                f"文件 {path} 超过单文件读取上限（{MAX_READ_BYTES // 1048576} MB），"
+                "请直接指定要审查的具体文件或分段。"
+            )
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise _ReviewFileError(f"无法读取文件 {path}：{exc}") from exc
@@ -2071,14 +2117,15 @@ def _review_prompt(display_name: str, content: str, *, json_mode: bool) -> str:
     """构造单文件审查 prompt：文件内容直接附上（带行号），避免工具轮的不确定性，
     并与系统提示词的对话式粘贴代码分支保持一致的"直接审查、不要求另存"语义。
 
-    行号格式与 read_file 一致（1-based、右对齐竖线分隔），保证 location 行号可靠；
-    超过 _MAX_REVIEW_LINES 的文件截断并在 prompt 中明示。围栏长度按内容中最长
-    连续反引号动态加大（内容本身含四反引号时不会提前闭合）；并明示围栏内是
-    待审查数据而非指令，收敛提示注入面。
+    行号格式与 read_file 一致（1-based、右对齐竖线分隔、同一行切分函数），保证
+    location 行号可靠；超过 _MAX_REVIEW_LINES 的文件截断并在 prompt 中明示。
+    围栏长度按内容中最长连续反引号动态加大（内容本身含四反引号时不会提前闭合）；
+    并明示围栏内是待审查数据而非指令，收敛提示注入面。
     """
-    lines = content.splitlines()[:_MAX_REVIEW_LINES]
+    all_lines = split_lines(content)
+    lines = all_lines[:_MAX_REVIEW_LINES]
     numbered = "\n".join(f"{i:>4} | {line}" for i, line in enumerate(lines, start=1))
-    total = len(content.splitlines())
+    total = len(all_lines)
     truncated = f"注意：文件共 {total} 行，以下仅含前 {len(lines)} 行，结论只基于这部分内容。\n" if total > len(lines) else ""
     longest_fence = max((len(m.group(0)) for m in re.finditer(r"`+", content)), default=0)
     fence = "`" * max(4, longest_fence + 1)
@@ -2264,6 +2311,9 @@ def _run_review_main(args: argparse.Namespace, console: Console) -> None:
     severe = False
     for display_name, content in files:
         console.print(f"正在审查 {display_name} …", markup=False)
+        # 每个文件独立上下文：审查 prompt 自包含（内容直接嵌入），跨文件累积
+        # 只会让 token 成本近平方增长、前序结论污染后续文件的评审独立性
+        agent.reset()
         prompt = _review_prompt(display_name, content, json_mode=args.json)
         try:
             answer = agent.run(prompt)
@@ -2396,17 +2446,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser(
         "uninstall",
-        help="卸载本工具（程序/垫片/PATH/用户数据分级清理，两道交互确认）",
+        help="卸载本工具（程序/垫片/PATH/用户数据/自设环境变量分级清理，多道交互确认）",
         description=(
             "卸载 code-review-agent：确认后删除 uv 工具与 cra 垫片（退出后由后台任务"
-            "执行），可选删除用户数据 ~/.cra/；确认前不删除任何内容。"
+            "执行），可选删除用户数据 ~/.cra/ 与本程序设置的环境变量；确认前不删除任何内容。"
         ),
     )
     return parser
 
 
+def _force_utf8_stdio() -> None:
+    """stdout/stderr 重配为 UTF-8（仅 TextIOWrapper 可重配，测试桩等非常规流跳过）。
+
+    Windows 管道/重定向下默认编码跟随 locale（如 cp936）：cra review 的结论
+    输出（--json 或自由文本，文档化用法即重定向给程序消费）遇到 GBK 外字符
+    （emoji 等）会 UnicodeEncodeError 整单崩溃，或产出非 UTF-8 字节；终端
+    交互路径本就是 UTF-8，重配只影响重定向场景。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> None:
     """cra 入口：省略子命令默认进入 chat REPL。"""
+    _force_utf8_stdio()
     args = _build_parser().parse_args()
     if args.command == "review":
         _run_review(args)

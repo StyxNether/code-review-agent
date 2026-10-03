@@ -8,6 +8,7 @@
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -475,3 +476,61 @@ class TestEnvRegistry:
         path.write_text('{"env_vars": ["OK_VAR", 3, null, ""]}', encoding="utf-8")
 
         assert config.registered_env_vars() == ["OK_VAR"]
+
+
+class TestKeylessEnvVarCollision:
+    """未设 api_key 的供应商回退变量撞名（接入点主机不同）：加载与写入时同样暴露。"""
+
+    @staticmethod
+    def _entry(name: str, base_url: str, api_key: str | None = None) -> dict[str, Any]:
+        entry: dict[str, Any] = {"name": name, "base_url": base_url, "models": ["m"]}
+        if api_key is not None:
+            entry["api_key"] = api_key
+        return entry
+
+    def test_keyless_providers_sharing_var_rejected(self) -> None:
+        """归一化变量名相同（"DeepSeek" 与 "deepseek"）且主机不同：凭据串用，拒绝。"""
+        data = {
+            "providers": [
+                self._entry("DeepSeek", "https://api.deepseek.com"),
+                self._entry("deepseek", "https://proxy.example.com/v1"),
+            ]
+        }
+
+        with pytest.raises(config.ConfigError, match="同一个 key 环境变量"):
+            config.validate_config(data)
+
+    def test_same_host_sharing_var_allowed(self) -> None:
+        """同主机共享官方变量名（同一供应商多端点，如 Z.ai 双预设）属设计内共享。"""
+        data = {
+            "providers": [
+                self._entry("Z.ai Coding Plan", "https://api.z.ai/api/coding/paas/v4"),
+                self._entry("Z.ai API", "https://api.z.ai/api/paas/v4"),
+            ]
+        }
+
+        config.validate_config(data)  # 不抛即通过
+
+    def test_provider_with_api_key_breaks_collision(self) -> None:
+        """一方已设 api_key（不依赖环境变量回退）即无串用面。"""
+        placeholder_key = "placeholder-" + "k"
+        data = {
+            "providers": [
+                self._entry("DeepSeek", "https://api.deepseek.com"),
+                self._entry("deepseek", "https://proxy.example.com/v1", api_key=placeholder_key),
+            ]
+        }
+
+        config.validate_config(data)  # 不抛即通过
+
+    def test_conflicting_keyless_env_vars_grouping(self) -> None:
+        providers = [
+            self._entry("DeepSeek", "https://api.deepseek.com"),
+            self._entry("deepseek", "https://proxy.example.com/v1"),
+            self._entry("Other", "https://other.example.com"),
+        ]
+
+        groups = config.conflicting_keyless_env_vars(providers)
+
+        assert set(groups) == {"CRA_DEEPSEEK_API_KEY"}
+        assert sorted(groups["CRA_DEEPSEEK_API_KEY"]) == ["DeepSeek", "deepseek"]
