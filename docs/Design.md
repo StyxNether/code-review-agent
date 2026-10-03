@@ -1,6 +1,5 @@
 # Design.md — 代码审查助手 code-review-agent
 
-《软件工程与项目实践》第 1 次作业 · 提交截止 2026-10-07 24:00（作业二将复用本项目成果，见 §2.2 与 §10）
 平台环境：Windows + Git Bash（PowerShell/CMD 兼容）。
 
 > 本文描述**目标形态**；已排期内容（§10）全部落地，代码、README 与本文一致；§2.2 的作业二接缝属目标形态、留待作业二。决策演化与开发过程记录见 §4 与 §8。
@@ -8,9 +7,6 @@
 ## 1. 项目概述
 
 `cra` 是一个基于 LLM 的命令行代码审查助手：给定一段/一个/一组代码文件（任意文本型源码、脚本与配置文件，不限编程语言），它以代码审查员身份给出问题清单（分级、定位、修改建议），并能在多轮对话中自主调用工具（读文件、运行代码）核实问题。支持多供应商模型配置与脚本化调用。
-
-- 交付物：GitHub 私有仓库 + README.md / Design.md +（可选）1 分钟演示视频；备份提交"学号姓名.rar"（<200M）至课程"001Homework1"。
-- 评分权重：功能完整性 40%（核心可用、边界情况）· Agent 架构 30%（设计模式、架构清晰度）· 代码质量 20% · 文档 10%。
 
 ## 2. 范围
 
@@ -102,7 +98,7 @@ tests/
 | 数据封装 | 会话消息结构与截断规则只存在于 agent.py；工具返回统一为字符串（错误也是字符串） |
 | 异常处理 | 按 §5：异常要么被结构化回传模型，要么给出用户可读报错，不允许静默吞掉 |
 | 性能 | 流式输出保证感知性能；工具调用有超时；上下文有截断阈值 |
-| 安全 | key 只在内存流转、不进仓库（用户目录配置文件除外，见 §7.4），且不进入子进程环境（run_python 环境净化）；run_python 限时 + 截断 + 环境净化 + 限制明示（第3讲 Gab 教训：规范一丢，漏洞就来） |
+| 安全 | key 只在内存流转、不进仓库（用户目录配置文件除外，见 §7.4），且不进入子进程环境（run_python 环境净化）；run_python 限时 + 截断 + 环境净化 + 限制明示 |
 
 ## 4. 关键决策记录（ADR）
 
@@ -156,7 +152,7 @@ tests/
 
 - ruff：默认规则 + `line-length = 100`；`tests/fixtures` 豁免（预埋样例属数据非业务代码）。
 - pytest `testpaths = ["tests"]`；**测试内禁止真实网络调用（LLM 一律 mock）**。
-- `.gitignore`：`.venv/`、`__pycache__/`、`.pytest_cache/`、`.ruff_cache/`、`dist/`、`.env`、`*.pyc`、`.mimosa/`、`AGENTS.md`、`docs/PROGRESS.md`、`Homework 1.pptx`（课程课件，暂不入库）。开发辅助文档（AGENTS.md、PROGRESS.md）仅本地维护、不随仓库分发；仓库内交付文档为 README.md 与 Design.md。
+- `.gitignore`：`.venv/`、`__pycache__/`、`.pytest_cache/`、`.ruff_cache/`、`dist/`、`.env`、`*.pyc`、`.mimosa/`、`AGENTS.md`、`docs/PROGRESS.md`、`Homework 1.pptx`（暂不入库）。开发辅助文档（AGENTS.md、PROGRESS.md）仅本地维护、不随仓库分发；仓库内交付文档为 README.md 与 Design.md。
 - 密钥边界：api_key 只允许出现在用户目录 `~/.cra/models.json`（§7.4）与进程内存；**仓库内任何文件、日志、测试样例、提交记录不得出现真实密钥**。
 
 ## 7. 接口规格
