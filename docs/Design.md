@@ -195,7 +195,7 @@ cra --version                      # 版本号
 | `/resume` | 恢复最近一次自动保留的会话（= /load _last；结构自检失败则提示存档不可用，正本不变） |
 | `/delete` | 删除已有会话：列出会话数字选择 + y/N 确认后删除文件（`_last` 同样可删，删即清除自动保留） |
 | `/confirm [on|off]` | run_python 执行确认开关（默认 off） |
-| `exit` 或 `/exit`（或 Ctrl+C 两次） | 退出 |
+| `exit` 或 `/exit`（或 Ctrl+C） | 退出 |
 | 其余 `/xxx`（未匹配内置命令） | 按普通文本发送给模型 |
 
 会话自动保留（`/resume` 的数据来源）：REPL 以任何方式退出（exit / /exit / EOF / Ctrl+C）时，将当前会话消息覆盖写入 `~/.cra/sessions/_last.json`（序列化与 /save 同路径，失败仅提示不阻断退出）；启动时若存在非空存档则打印一行提示（不自动加载，避免上下文静默混入）。
