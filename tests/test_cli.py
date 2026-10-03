@@ -1378,11 +1378,9 @@ class TestFirstRunSetup:
     ) -> None:
         """DoD 演示路径：Y → DeepSeek 预设 → 回车 base_url → 回车预填 → key →
         环境变量存储 → 自动设默认 → 进入 REPL。"""
+        # 真实环境若已有上述变量会触发覆盖确认或使 resolve 提前成功，导致输入序列错位
         monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("SE_CodeAgent", raising=False)
-        # 真实环境若已有该变量会触发覆盖确认、使输入序列错位
-        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
-        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         run_calls: list[list[str]] = []
 
         def fake_run(cmd: list[str], **_kwargs: Any) -> Any:

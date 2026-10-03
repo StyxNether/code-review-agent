@@ -125,7 +125,7 @@ def env_registry_path() -> Path:
     """本程序写入的环境变量登记文件（~/.cra/env-vars.json）。
 
     卸载时据此区分"程序自己设置的变量"与"用户已有的同名变量"——只清前者，
-    绝不触碰后者（用户在检查作业之前可能就有 DEEPSEEK_API_KEY 等变量）。
+    绝不触碰后者（用户在检查作业之前可能就有 CRA_DEEPSEEK_API_KEY 等变量）。
     """
     return config_path().parent / "env-vars.json"
 

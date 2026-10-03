@@ -31,8 +31,8 @@ PROBE_MAX_TOKENS = 1  # 连通性自检只发一次 max_tokens=1 的最小请求
 def _key_hint() -> str:
     """key 设置命令按当前平台给出（默认供应商 DeepSeek 的统一变量名）。"""
     if sys.platform == "win32":
-        return "Windows：setx CRA_DEEPSEEK_API_KEY <你的key>，然后新开终端生效"
-    return "macOS/Linux：export CRA_DEEPSEEK_API_KEY=<你的key>（写入 ~/.bashrc 或 ~/.zshrc 持久化）"
+        return 'Windows：setx CRA_DEEPSEEK_API_KEY "你的key"，然后新开终端生效'
+    return 'macOS/Linux：export CRA_DEEPSEEK_API_KEY="你的key"（写入 ~/.bashrc 或 ~/.zshrc 持久化）'
 
 
 def _auth_guidance() -> str:

@@ -225,7 +225,7 @@ class TestConfigTest:
     @pytest.fixture(autouse=True)
     def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """探测的 key 回退读真实环境变量,测试中统一清空。"""
-        monkeypatch.delenv("CRA_CRA_DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("CRA_DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("SE_CodeAgent", raising=False)
 
     def _patch_probes(

@@ -225,7 +225,7 @@ cra --version                      # 版本号
 - 供应商预设与 key 存储选择（D17）：`cra config` 与首次引导添加供应商时提供预设编号选择——选预设自动填入官方 base_url 与模型清单（**预填项均可修改**：base_url 回车用官方接入点或输入自定义；模型清单询问是否使用预填）；填 key 后选择存储方式——1) 明文写入 models.json（现状，含权限与备份提示）2) 环境变量（变量名统一为 `CRA_供应商名大写_API_KEY`：供应商名大写、空格与非字母数字转 `_`、非 ASCII 字符剥离；预设供应商同格式、取规范短名；Windows 经 `setx` 写入用户环境并设置当前进程 `os.environ` 即时生效，POSIX 打印 `export` 指令由用户执行）；选环境变量时 models.json **不存明文 key**，该供应商已有明文的**一并移除**。
 - 环境变量覆盖保护与登记（D17 修订，2026-10-02）：写环境变量前若该变量**非本程序所设**且当前环境已有同名变量（用户在检查作业前可能就有 `CRA_DEEPSEEK_API_KEY` 等），询问"是否覆盖其值"（y/N **默认 N** 保护既有值，拒绝则 key 回退明文、原变量不动）；变量已登记在案（本程序之前设置）时直接更新、不再询问。每次成功写入即登记到 `~/.cra/env-vars.json`（去重、原子写；损坏按空清单处理）——**卸载时只清理登记在案的变量**，绝不触碰用户已有变量；登记失败（磁盘等）不阻塞 key 设置但明示"卸载时无法自动清理"。
 - `cra config` 写入时提示文件权限与备份注意事项（key 为明文，属用户本机数据，见 D9/§9）。
-- 解析优先级：`--model/--provider` 参数 > 配置文件 `default` > 环境变量回退（`SE_CodeAgent`/`CRA_MODEL`/`CRA_BASE_URL`）。配置文件与环境变量皆缺时，打印 `cra config` 引导后退出（退出码 2）。
+- 解析优先级：`--model/--provider` 参数 > 配置文件 `default` > 环境变量回退（key：`CRA_DEEPSEEK_API_KEY` → `SE_CodeAgent`；模型/接入点：`CRA_MODEL`/`CRA_BASE_URL`）。配置文件与环境变量皆缺时，打印 `cra config` 引导后退出（退出码 2）。
 - `cra config test`：对每个供应商用当前 key 发一次 `max_tokens=1` 的对话请求，报告 OK / 401（key 无效）/ 超时（网络不可达）；退出码：全 OK 为 0、存在失败为 1（检查结论）、配置错误为 2（运行错误）。探测用短超时（15s）且 `max_retries=0`——自检语义是快速反馈，不承担业务请求的重试。
 - 安全边界：该文件含明文 key，属用户本机数据的已知取舍（D9）；文档提示文件权限与备份注意事项，仓库侧由 .gitignore 与密钥门禁保证永不入库。
 
@@ -418,19 +418,19 @@ stdin 输入时 `file` 取 `"<stdin>"`；目录入参展开其第一层的文本
   1. **首次配置引导**：chat 无任何配置时询问"是否现在配置"——确认走引导式配置（添加供应商 → key → 设默认模型 → 进入 REPL，复用 `cra config` 交互函数与 _ConfigSession，不重写逻辑）；拒绝/完成后仍无配置维持指引 + 退出 2；`cra review` 保持非交互退出 2（§5 修订）；
   2. **供应商预设**：`cra config` 添加供应商提供编号选择（1 自定义 + 8 家预设），选预设自动填官方 base_url 与模型清单，**预填项均可修改**（base_url 回车用官方、模型清单询问是否使用预填）；预设表如下（2026-10-02 按官方文档核对，**实现前须逐项复核时效性**）：
 
-     | # | 供应商 | base_url | 预填模型 | 惯用变量名 |
+     | # | 供应商 | base_url | 预填模型 | 环境变量名 |
      |---|--------|----------|----------|-----------|
-     | 1 | 自定义 | 用户填写 | 用户填写 | 规则生成 |
-     | 2 | DeepSeek | `https://api.deepseek.com` | deepseek-flash, deepseek-v4-pro | `DEEPSEEK_API_KEY` |
-     | 3 | Kimi (Moonshot) | `https://api.moonshot.cn/v1` | kimi-k3, kimi-k2.6 | `MOONSHOT_API_KEY` |
-     | 4 | OpenAI | `https://api.openai.com/v1` | gpt-6-astra, gpt-6-luna（⚠ 命名迭代快，实现时按官方 models 页复核） | `OPENAI_API_KEY` |
-     | 5 | 阿里云百炼 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | qwen3.8-max, qwen3.8-flash | `DASHSCOPE_API_KEY` |
-     | 6 | Z.ai Coding Plan | `https://api.z.ai/api/coding/paas/v4` | glm-5.3, glm-5.3-flash | `ZAI_API_KEY` |
-     | 7 | Z.ai API | `https://api.z.ai/api/paas/v4` | glm-5.3, glm-5.3-flash | `ZAI_API_KEY` |
-     | 8 | BigModel Coding Plan | `https://open.bigmodel.cn/api/coding/paas/v4` | glm-5.3, glm-5.3-flash | `ZHIPUAI_API_KEY` |
-     | 9 | BigModel API | `https://open.bigmodel.cn/api/paas/v4` | glm-5.3, glm-5.3-flash | `ZHIPUAI_API_KEY` |
+     | 1 | 自定义 | 用户填写 | 用户填写 | 规则生成（CRA_ 前缀格式） |
+     | 2 | DeepSeek | `https://api.deepseek.com` | deepseek-flash, deepseek-v4-pro | `CRA_DEEPSEEK_API_KEY` |
+     | 3 | Kimi (Moonshot) | `https://api.moonshot.cn/v1` | kimi-k3, kimi-k2.6 | `CRA_MOONSHOT_API_KEY` |
+     | 4 | OpenAI | `https://api.openai.com/v1` | gpt-6-astra, gpt-6-luna（⚠ 命名迭代快，实现时按官方 models 页复核） | `CRA_OPENAI_API_KEY` |
+     | 5 | 阿里云百炼 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | qwen3.8-max, qwen3.8-flash | `CRA_DASHSCOPE_API_KEY` |
+     | 6 | Z.ai Coding Plan | `https://api.z.ai/api/coding/paas/v4` | glm-5.3, glm-5.3-flash | `CRA_ZAI_API_KEY` |
+     | 7 | Z.ai API | `https://api.z.ai/api/paas/v4` | glm-5.3, glm-5.3-flash | `CRA_ZAI_API_KEY` |
+     | 8 | BigModel Coding Plan | `https://open.bigmodel.cn/api/coding/paas/v4` | glm-5.3, glm-5.3-flash | `CRA_ZHIPUAI_API_KEY` |
+     | 9 | BigModel API | `https://open.bigmodel.cn/api/paas/v4` | glm-5.3, glm-5.3-flash | `CRA_ZHIPUAI_API_KEY` |
 
-  3. **key 存储选择**（D17）：明文 vs 环境变量；变量名规则、Windows `setx` 自动 + 进程内生效、POSIX 打印 `export`、models.json 不存明文/移除已有明文、resolve 回退链 `{PROVIDER}_API_KEY` → `SE_CodeAgent`（§5/§7.4 修订）；
+  3. **key 存储选择**（D17）：明文 vs 环境变量；变量名统一 `CRA_供应商名大写_API_KEY`、Windows `setx` 自动 + 进程内生效、POSIX 打印 `export`、models.json 不存明文/移除已有明文、resolve 回退链 `CRA_供应商名大写_API_KEY` → `SE_CodeAgent`（§5/§7.4 修订）；
   4. **会话管理**：`/load` 与菜单 4) 省略名称时列出会话数字选择；加载后自动打印全部历史；`/delete` + 菜单 6)（y/N 确认）；菜单 3) 保存回车自动时间戳命名（§7.3 修订）；
   5. **切换模型**：现有 `/change model` 已是"先供应商后模型"流程，仅补充**当前使用中**标记。
   6. **卸载程序 `cra uninstall`**（2026-10-02 用户提出：评审完要能删干净，与常见软件卸载程序同等彻底）：

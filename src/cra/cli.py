@@ -227,9 +227,9 @@ def _short(text: str, limit: int = _TOOL_ARGS_PREVIEW_LIMIT) -> str:
 def _setup_hint() -> str:
     """key 设置命令按当前平台给出（默认供应商 DeepSeek 的统一变量名）。"""
     if sys.platform == "win32":
-        return "设置方法（Windows）：setx CRA_DEEPSEEK_API_KEY <你的key>，然后新开终端重试。"
+        return '设置方法（Windows）：setx CRA_DEEPSEEK_API_KEY "你的key"，然后新开终端重试。'
     return (
-        "设置方法（macOS/Linux）：export CRA_DEEPSEEK_API_KEY=<你的key>"
+        '设置方法（macOS/Linux）：export CRA_DEEPSEEK_API_KEY="你的key"'
         "（写入 ~/.bashrc 或 ~/.zshrc 可持久化）。"
     )
 
@@ -1271,8 +1271,8 @@ def _input_base_url_and_models(
 def _apply_key_storage(session: _ConfigSession, entry: dict[str, Any], key: str) -> None:
     """key 存储选择：1 明文写入 models.json 或 2 用户环境变量。
 
-    选环境变量时 models.json 不落明文、该供应商已有明文一并移除；变量名预设
-    供应商用官方惯用名、自定义按规则生成（config.provider_env_var）。setx 失败
+    选环境变量时 models.json 不落明文、该供应商已有明文一并移除；变量名统一为
+    `CRA_供应商名大写_API_KEY`（config.provider_env_var）。setx 失败
     回退明文（有明确提示），避免 key 既不在文件也不在环境而丢失。
     """
     console = session.console
