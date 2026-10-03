@@ -1,0 +1,2 @@
+This is a plain text note, not a Python source file.
+这里是一段普通笔记，用于验证非 Python 文件的友好提示。

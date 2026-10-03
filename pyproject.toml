@@ -1,0 +1,38 @@
+[project]
+name = "code-review-agent"
+version = "0.1.0"
+description = "基于 LLM 的命令行代码审查助手（CLI）"
+readme = "README.md"
+authors = [
+    { name = "Styx River", email = "86139064+StyxNether@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "langchain>=1.0",
+    "langchain-openai>=1.0",
+    "rich>=15.0.0",
+]
+
+[project.scripts]
+cra = "cra.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cra"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
+
+[tool.ruff]
+line-length = 100
+# tests/fixtures 是预埋的边界样例数据（如故意写错的 syntax_error.py），非业务代码
+extend-exclude = ["tests/fixtures"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

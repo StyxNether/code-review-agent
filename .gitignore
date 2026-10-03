@@ -1,0 +1,18 @@
+# Python 运行产物
+__pycache__/
+*.pyc
+.venv/
+
+# 工具缓存
+.pytest_cache/
+.ruff_cache/
+
+# 构建与发布产物
+dist/
+build/
+
+# 本地环境与密钥（绝不入库）
+.env
+
+# Office 等编辑器的临时锁文件
+~$*
