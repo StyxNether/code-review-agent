@@ -1,20 +1,18 @@
-.venv/
+# Python 运行产物
 __pycache__/
+*.pyc
+.venv/
+
+# 工具缓存
 .pytest_cache/
 .ruff_cache/
+
+# 构建与发布产物
 dist/
+build/
+
+# 本地环境与密钥（绝不入库）
 .env
-*.pyc
 
-# 本地安全扫描工具（mimosa 插件）状态目录，非项目内容
-.mimosa/
-
-# 开发辅助文档（跨会话交接与 AI 会话协议），仅本地维护，不随仓库分发
-AGENTS.md
-docs/PROGRESS.md
-
-# 课程课件（是否入库待用户决定，先避免误提交）
-Homework 1.pptx
-
-# Office 等应用的锁文件（打开文档时产生，纯临时文件）
+# Office 等编辑器的临时锁文件
 ~$*
